@@ -9,6 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
+import { getSystemMessageText, renderSystemMessageUpdate } from "@earendil-works/pi-ai";
 import {
 	type AssistantMessage,
 	type ImageContent,
@@ -96,7 +97,7 @@ import type {
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
-import { createCompactionSummaryMessage, createCustomMessage } from "../../core/messages.ts";
+import { convertToLlm, createCompactionSummaryMessage, createCustomMessage } from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
@@ -3390,6 +3391,16 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/prompt") {
+				this.handlePromptCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/prompt full") {
+				this.handleFullPromptCommand();
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/changelog") {
 				this.handleChangelogCommand();
 				this.editor.setText("");
@@ -3431,9 +3442,14 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/new") {
+			if (text === "/new" || text.startsWith("/new ")) {
+				const newPrompt = text.startsWith("/new ") ? text.slice(5).trim() : undefined;
 				this.editor.setText("");
 				await this.handleClearCommand();
+				if (newPrompt) {
+					this.editor.addToHistory?.(text);
+					await this.session.prompt(newPrompt);
+				}
 				return;
 			}
 			if (text === "/compact" || text.startsWith("/compact ")) {
@@ -6965,6 +6981,91 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new ThemedText(renderInfo, 1, 0));
 		this.ui.requestRender();
+	}
+
+	private handlePromptCommand(): void {
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new DynamicBorder());
+		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "System Prompt")), 1, 0));
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(this.session.systemPrompt, 1, 1));
+		this.chatContainer.addChild(new DynamicBorder());
+		this.ui.requestRender();
+	}
+
+	private handleFullPromptCommand(): void {
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new DynamicBorder());
+		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Full Prompt")), 1, 0));
+
+		// The session projection is what each request is built from: the leading system message
+		// carries the prompt, later system messages patch it, and omitted attempts are left out.
+		const llmMessages = convertToLlm(this.session.sessionManager.buildSessionProjection().messages);
+		if (llmMessages[0]?.role !== "system") {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "── system ──")), 1, 0));
+			this.chatContainer.addChild(new Text(this.session.systemPrompt, 1, 0));
+		}
+		for (const [index, msg] of llmMessages.entries()) {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", `── ${msg.role} ──`)), 1, 0));
+			const lines = this.renderLlmMessageContent(msg, index === 0);
+			if (lines.length === 0) {
+				this.chatContainer.addChild(new Text(theme.fg("muted", "(empty)"), 1, 0));
+			} else {
+				for (const line of lines) {
+					this.chatContainer.addChild(new Text(line, 1, 0));
+				}
+			}
+		}
+
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new DynamicBorder());
+		this.ui.requestRender();
+	}
+
+	private renderLlmMessageContent(msg: Message, leading: boolean): string[] {
+		const out: string[] = [];
+		if (msg.role === "system") {
+			const text = leading ? getSystemMessageText(msg) : renderSystemMessageUpdate(msg);
+			if (text) out.push(text);
+			if (msg.toolsAdded?.length) out.push(`[tools added: ${msg.toolsAdded.map((tool) => tool.name).join(", ")}]`);
+			if (msg.toolsRemoved?.length) {
+				out.push(`[tools removed: ${msg.toolsRemoved.map((tool) => tool.name).join(", ")}]`);
+			}
+		} else if (msg.role === "user") {
+			if (typeof msg.content === "string") {
+				out.push(msg.content);
+			} else {
+				for (const block of msg.content) {
+					if (block.type === "text") {
+						out.push(block.text);
+					} else {
+						out.push(`[image: ${block.mimeType}]`);
+					}
+				}
+			}
+		} else if (msg.role === "assistant") {
+			for (const block of msg.content) {
+				if (block.type === "text") {
+					out.push(block.text);
+				} else if (block.type === "thinking") {
+					out.push(`[thinking]\n${block.thinking}`);
+				} else {
+					out.push(`[tool_call:${block.name} id=${block.id}] ${JSON.stringify(block.arguments)}`);
+				}
+			}
+		} else {
+			out.push(`[tool_result:${msg.toolName} id=${msg.toolCallId}${msg.isError ? " ERROR" : ""}]`);
+			for (const block of msg.content) {
+				if (block.type === "text") {
+					out.push(block.text);
+				} else {
+					out.push(`[image: ${block.mimeType}]`);
+				}
+			}
+		}
+		return out;
 	}
 
 	private handleChangelogCommand(): void {

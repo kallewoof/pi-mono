@@ -124,6 +124,20 @@ function buildRules(
 	return rules.map((rule) => `- ${rule}`).join("\n");
 }
 
+/** Replace {key} placeholders in a prompt template. Unknown keys are left as-is. */
+export function applySystemPromptTemplate(template: string, values: Record<string, string>): string {
+	return template.replace(/\{([^}]+)\}/g, (match, key) => values[key] ?? match);
+}
+
+function currentDateTime(): { date: string; time: string } {
+	const now = new Date();
+	const pad = (value: number): string => String(value).padStart(2, "0");
+	return {
+		date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+		time: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
+	};
+}
+
 /** Build the ordered, independently replaceable sections of the structured system prompt. */
 export function buildSystemPromptSections(input: BuildSystemPromptOptions): SystemPromptSections {
 	const options = normalizeBuildSystemPromptOptions(input);
@@ -148,17 +162,30 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 	}
 
 	const declaredTools = selectedTools.filter((name) => !hiddenTools.includes(name));
+	const promptCwd = cwd.replace(/\\/g, "/");
+	const { date, time } = currentDateTime();
+	const visibleTools = declaredTools.filter((name) => !!toolSnippets[name]);
+	const toolsList =
+		visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets[name]}`).join("\n") : "(none)";
+	const rules = buildRules(declaredTools, toolGuidelines, promptGuidelines);
 	const promptSections: Record<string, string> = {};
 	if (customPrompt) {
-		promptSections.preamble = customPrompt;
+		// A custom prompt is a template: it opts into the tool list, rules, paths, date, and cwd via {key}.
+		promptSections.preamble = applySystemPromptTemplate(customPrompt, {
+			tools_list: toolsList,
+			guidelines: rules,
+			readme_path: getReadmePath(),
+			docs_path: getDocsPath(),
+			examples_path: getExamplesPath(),
+			date,
+			time,
+			cwd: promptCwd,
+		});
 	} else {
 		promptSections.preamble =
 			"You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.";
-		const visibleTools = declaredTools.filter((name) => !!toolSnippets[name]);
-		const tools =
-			visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets[name]}`).join("\n") : "(none)";
-		promptSections.tools = `${tools}\n\nAdditional tools may be available.`;
-		promptSections.rules = buildRules(declaredTools, toolGuidelines, promptGuidelines);
+		promptSections.tools = `${toolsList}\n\nAdditional tools may be available.`;
+		promptSections.rules = rules;
 		promptSections.docs = `Pi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):
 - Main documentation: ${getReadmePath()}
 - Additional docs: ${getDocsPath()}
@@ -179,7 +206,9 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		const skillsPrompt = formatSkillsForPrompt(skills, skillFileReadTool).trim();
 		if (skillsPrompt) promptSections.skills = skillsPrompt;
 	}
-	promptSections.cwd = cwd.replace(/\\/g, "/");
+	// Its own section, so a day rollover re-sends only the date rather than the whole prompt.
+	if (!customPrompt) promptSections.date = date;
+	promptSections.cwd = promptCwd;
 	for (const [name, content] of Object.entries(customSections)) {
 		if (content) promptSections[name] = content;
 	}
