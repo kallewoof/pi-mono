@@ -83,7 +83,7 @@ import type {
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
-import { createCompactionSummaryMessage } from "../../core/messages.ts";
+import { convertToLlm, createCompactionSummaryMessage } from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
@@ -3033,6 +3033,16 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/prompt") {
+				this.handlePromptCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/prompt full") {
+				this.handleFullPromptCommand();
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/changelog") {
 				this.handleChangelogCommand();
 				this.editor.setText("");
@@ -3074,9 +3084,14 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/new") {
+			if (text === "/new" || text.startsWith("/new ")) {
+				const newPrompt = text.startsWith("/new ") ? text.slice(5).trim() : undefined;
 				this.editor.setText("");
 				await this.handleClearCommand();
+				if (newPrompt) {
+					this.editor.addToHistory?.(text);
+					await this.session.prompt(newPrompt);
+				}
 				return;
 			}
 			if (text === "/compact" || text.startsWith("/compact ")) {
@@ -6230,6 +6245,80 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));
 		this.ui.requestRender();
+	}
+
+	private handlePromptCommand(): void {
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new DynamicBorder());
+		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "System Prompt")), 1, 0));
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(this.session.systemPrompt, 1, 1));
+		this.chatContainer.addChild(new DynamicBorder());
+		this.ui.requestRender();
+	}
+
+	private handleFullPromptCommand(): void {
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new DynamicBorder());
+		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Full Prompt")), 1, 0));
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "── system ──")), 1, 0));
+		this.chatContainer.addChild(new Text(this.session.systemPrompt, 1, 0));
+
+		const llmMessages = convertToLlm(this.session.messages);
+		for (const msg of llmMessages) {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", `── ${msg.role} ──`)), 1, 0));
+			const lines = this.renderLlmMessageContent(msg);
+			if (lines.length === 0) {
+				this.chatContainer.addChild(new Text(theme.fg("muted", "(empty)"), 1, 0));
+			} else {
+				for (const line of lines) {
+					this.chatContainer.addChild(new Text(line, 1, 0));
+				}
+			}
+		}
+
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new DynamicBorder());
+		this.ui.requestRender();
+	}
+
+	private renderLlmMessageContent(msg: Message): string[] {
+		const out: string[] = [];
+		if (msg.role === "user") {
+			if (typeof msg.content === "string") {
+				out.push(msg.content);
+			} else {
+				for (const block of msg.content) {
+					if (block.type === "text") {
+						out.push(block.text);
+					} else {
+						out.push(`[image: ${block.mimeType}]`);
+					}
+				}
+			}
+		} else if (msg.role === "assistant") {
+			for (const block of msg.content) {
+				if (block.type === "text") {
+					out.push(block.text);
+				} else if (block.type === "thinking") {
+					out.push(`[thinking]\n${block.thinking}`);
+				} else {
+					out.push(`[tool_call:${block.name} id=${block.id}] ${JSON.stringify(block.arguments)}`);
+				}
+			}
+		} else {
+			out.push(`[tool_result:${msg.toolName} id=${msg.toolCallId}${msg.isError ? " ERROR" : ""}]`);
+			for (const block of msg.content) {
+				if (block.type === "text") {
+					out.push(block.text);
+				} else {
+					out.push(`[image: ${block.mimeType}]`);
+				}
+			}
+		}
+		return out;
 	}
 
 	private handleChangelogCommand(): void {
