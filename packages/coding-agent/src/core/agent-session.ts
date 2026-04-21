@@ -1274,6 +1274,21 @@ export class AgentSession {
 			}
 			this._pendingNextTurnMessages = [];
 
+			// Inject time update when 1+ hour has passed since the last user message
+			const lastUserMsg = [...this.agent.state.messages].reverse().find((m) => m.role === "user");
+			if (lastUserMsg?.timestamp && Date.now() - lastUserMsg.timestamp >= 60 * 60 * 1000) {
+				const now = new Date();
+				const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+				const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+				messages.unshift({
+					role: "custom",
+					customType: "time-update",
+					content: `Time update: it is now ${date} ${time}`,
+					display: true,
+					timestamp: Date.now(),
+				});
+			}
+
 			// Emit before_agent_start extension event
 			const result = await this._extensionRunner.emitBeforeAgentStart(
 				expandedText,
