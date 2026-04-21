@@ -782,6 +782,148 @@ describe("Agent", () => {
 		expect(callbackContextRoles).toEqual(["user", "assistant", "toolResult"]);
 	});
 
+	it("retryLastTurn() should drop error assistant message and re-run from user message", async () => {
+		let callCount = 0;
+		const agent = new Agent({
+			streamFn: () => {
+				callCount++;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Retry succeeded") });
+				});
+				return stream;
+			},
+		});
+
+		const userMessage = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "Do the thing" }],
+			timestamp: Date.now() - 10,
+		};
+		const errorMessage: AssistantMessage = {
+			...createAssistantMessage(""),
+			stopReason: "error",
+			errorMessage: "Model unreachable",
+		};
+		agent.state.messages = [userMessage, errorMessage];
+
+		await agent.retryLastTurn();
+
+		// Error message was replaced with the successful one
+		expect(callCount).toBe(1);
+		const msgs = agent.state.messages;
+		expect(msgs[0]).toBe(userMessage);
+		expect(msgs[msgs.length - 1].role).toBe("assistant");
+		expect((msgs[msgs.length - 1] as AssistantMessage).stopReason).toBe("stop");
+		// No duplicate user messages
+		expect(msgs.filter((m) => m.role === "user").length).toBe(1);
+	});
+
+	it("retryLastTurn() should work with stopReason 'aborted'", async () => {
+		const agent = new Agent({
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+				});
+				return stream;
+			},
+		});
+
+		const errorMessage: AssistantMessage = {
+			...createAssistantMessage(""),
+			stopReason: "aborted",
+			errorMessage: "Aborted by user",
+		};
+		agent.state.messages = [
+			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 10 },
+			errorMessage,
+		];
+
+		await expect(agent.retryLastTurn()).resolves.toBeUndefined();
+		expect(agent.state.messages[agent.state.messages.length - 1].role).toBe("assistant");
+		expect((agent.state.messages[agent.state.messages.length - 1] as AssistantMessage).stopReason).toBe("stop");
+	});
+
+	it("retryLastTurn() should clear errorMessage on state", async () => {
+		const agent = new Agent({
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+				});
+				return stream;
+			},
+		});
+
+		agent.state.messages = [
+			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 10 },
+			{ ...createAssistantMessage(""), stopReason: "error", errorMessage: "oops" },
+		];
+
+		await agent.retryLastTurn();
+
+		expect(agent.state.errorMessage).toBeUndefined();
+	});
+
+	it("retryLastTurn() should throw when last message is not assistant", async () => {
+		const agent = new Agent({ streamFn: () => new MockAssistantStream() });
+		agent.state.messages = [{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() }];
+
+		await expect(agent.retryLastTurn()).rejects.toThrow("Cannot retry: last message is not an assistant message");
+	});
+
+	it("retryLastTurn() should throw when last assistant message has non-error stopReason", async () => {
+		const agent = new Agent({ streamFn: () => new MockAssistantStream() });
+		agent.state.messages = [
+			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 10 },
+			createAssistantMessage("Fine response"),
+		];
+
+		await expect(agent.retryLastTurn()).rejects.toThrow(
+			'Cannot retry: last assistant message has stopReason "stop", expected "error" or "aborted"',
+		);
+	});
+
+	it("retryLastTurn() should throw when no messages exist", async () => {
+		const agent = new Agent({ streamFn: () => new MockAssistantStream() });
+
+		await expect(agent.retryLastTurn()).rejects.toThrow("Cannot retry: last message is not an assistant message");
+	});
+
+	it("retryLastTurn() should throw when agent is already processing", async () => {
+		let abortSignal: AbortSignal | undefined;
+		const agent = new Agent({
+			streamFn: (_model, _context, options) => {
+				abortSignal = options?.signal;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					const checkAbort = () => {
+						if (abortSignal?.aborted) {
+							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
+						} else {
+							setTimeout(checkAbort, 5);
+						}
+					};
+					checkAbort();
+				});
+				return stream;
+			},
+		});
+
+		const firstPrompt = agent.prompt("First message");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(agent.state.isStreaming).toBe(true);
+
+		await expect(agent.retryLastTurn()).rejects.toThrow(
+			"Agent is already processing. Wait for completion before retrying.",
+		);
+
+		agent.abort();
+		await firstPrompt.catch(() => {});
+	});
+
 	it("forwards sessionId to streamFunction options", async () => {
 		let receivedSessionId: string | undefined;
 		const agent = new Agent({

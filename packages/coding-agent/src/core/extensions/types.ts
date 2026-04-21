@@ -1377,6 +1377,17 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
 	): void;
 
+	/**
+	 * Retry the last turn without re-injecting the user message.
+	 * Drops the trailing error assistant message and re-runs the agent loop from
+	 * the existing context. Use this instead of sendUserMessage when retrying
+	 * after a model failure to avoid duplicate user messages.
+	 *
+	 * Throws if the last message is not an assistant message with stopReason
+	 * "error" or "aborted".
+	 */
+	retryLastTurn(): void;
+
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
@@ -1656,6 +1667,8 @@ export type SetThinkingLevelHandler = (level: ThinkingLevel) => void;
 
 export type SetLabelHandler = (entryId: string, label: string | undefined) => void;
 
+export type RetryLastTurnHandler = () => void;
+
 /**
  * Shared state created by loader, used during registration and runtime.
  * Contains flag values (defaults set during registration, CLI values set after).
@@ -1690,6 +1703,7 @@ export interface ExtensionRuntimeState {
 export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
+	retryLastTurn: RetryLastTurnHandler;
 	appendEntry: AppendEntryHandler;
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;

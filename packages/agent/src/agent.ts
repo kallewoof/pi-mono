@@ -357,6 +357,38 @@ export class Agent {
 		await this.runPromptMessages(messages);
 	}
 
+	/**
+	 * Retry the last turn by dropping the trailing error assistant message and re-running
+	 * the agent loop from the existing context. The last message must be an AssistantMessage
+	 * with stopReason "error" or "aborted".
+	 *
+	 * Use this instead of `sendUserMessage` when retrying after a model failure, to avoid
+	 * injecting the original user prompt a second time.
+	 */
+	async retryLastTurn(): Promise<void> {
+		if (this.activeRun) {
+			throw new Error("Agent is already processing. Wait for completion before retrying.");
+		}
+
+		const messages = this._state.messages;
+		const lastMessage = messages[messages.length - 1];
+
+		if (!lastMessage || lastMessage.role !== "assistant") {
+			throw new Error("Cannot retry: last message is not an assistant message");
+		}
+
+		if (lastMessage.stopReason !== "error" && lastMessage.stopReason !== "aborted") {
+			throw new Error(
+				`Cannot retry: last assistant message has stopReason "${lastMessage.stopReason}", expected "error" or "aborted"`,
+			);
+		}
+
+		this._state.messages = messages.slice(0, -1);
+		this._state.errorMessage = undefined;
+
+		await this.runContinuation();
+	}
+
 	/** Continue from the current transcript. The last message must be a user or tool-result message. */
 	async continue(): Promise<void> {
 		if (this.activeRun) {
