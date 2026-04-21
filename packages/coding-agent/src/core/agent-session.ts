@@ -2626,6 +2626,15 @@ export class AgentSession {
 	}
 
 	/**
+	 * Retry the last turn by dropping the trailing error assistant message and
+	 * re-running the agent loop from the existing context. Throws if the last
+	 * message is not an error assistant message.
+	 */
+	async retryLastTurn(): Promise<void> {
+		await this.agent.retryLastTurn();
+	}
+
+	/**
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
@@ -3585,6 +3594,15 @@ export class AgentSession {
 						runner.emitError({
 							extensionPath: "<runtime>",
 							event: "send_user_message",
+							error: err instanceof Error ? err.message : String(err),
+						});
+					});
+				},
+				retryLastTurn: () => {
+					this.retryLastTurn().catch((err) => {
+						runner.emitError({
+							extensionPath: "<runtime>",
+							event: "retry_last_turn",
 							error: err instanceof Error ? err.message : String(err),
 						});
 					});
