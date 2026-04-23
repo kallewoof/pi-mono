@@ -17,8 +17,6 @@ cd packages/<pkg>
 npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts
 ```
 
-**NEVER run:** `npm run dev`, `npm run build`, `npm test` — these are reserved for the user.
-
 Only run tests if the user instructs it, or if you create/modify a test file (in which case you MUST run it and iterate until it passes).
 
 ## Architecture
