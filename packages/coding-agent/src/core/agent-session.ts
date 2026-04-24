@@ -664,8 +664,17 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first
-		await this._emitExtensionEvent(event);
+		// Suppress agent_end to extensions when overflow recovery is about to happen.
+		// Overflow is a temporary interruption (compaction + retry), not a task completion.
+		// Extensions receive agent_end only when the agent truly finishes.
+		const isOverflowRecovery =
+			event.type === "agent_end" &&
+			this._lastAssistantMessage !== undefined &&
+			this._isOverflowRecovery(this._lastAssistantMessage);
+
+		if (!isOverflowRecovery) {
+			await this._emitExtensionEvent(event);
+		}
 
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
@@ -2124,6 +2133,23 @@ export class AgentSession {
 	 */
 	abortBranchSummary(): void {
 		this._branchSummaryAbortController?.abort();
+	}
+
+	/**
+	 * Return true when the given overflow error message will trigger compaction + retry.
+	 * Used to suppress the extension agent_end event for that turn (the agent isn't done yet).
+	 */
+	private _isOverflowRecovery(msg: AssistantMessage): boolean {
+		if (this._overflowRecoveryAttempted) return false;
+		const settings = this.settingsManager.getCompactionSettings();
+		if (!settings.enabled) return false;
+		const contextWindow = this.model?.contextWindow ?? 0;
+		if (contextWindow === 0) return false;
+		const sameModel = this.model !== undefined && msg.provider === this.model.provider && msg.model === this.model.id;
+		if (!sameModel) return false;
+		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		if (compactionEntry !== null && msg.timestamp <= new Date(compactionEntry.timestamp).getTime()) return false;
+		return isContextOverflow(msg, contextWindow);
 	}
 
 	/**
