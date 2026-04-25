@@ -12,6 +12,9 @@
  */
 
 import * as crypto from "node:crypto";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import type { AgentSession, ExtensionBindings } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type {
 	ExtensionUIContext,
@@ -56,6 +59,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
+
+	// Named context sessions: each context name maps to an independent AgentSession.
+	const contextSessions = new Map<string, AgentSession>();
+	const contextUnsubscribers = new Map<string, () => void>();
+	const contextFiles = new Map<string, string>();
 
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		writeRawStdout(serializeJsonLine(obj));
@@ -310,45 +318,60 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		},
 	});
 
+	// Lazy ref to avoid TDZ: getOrCreateContextSession is defined after the first rebindSession call.
+	let contextRouter: ((name: string) => Promise<AgentSession>) | undefined;
+
 	runtimeHost.setRebindSession(async () => {
 		await rebindSession();
 	});
 
+	const buildSessionBindings = (target: AgentSession): ExtensionBindings => ({
+		uiContext: createExtensionUIContext(),
+		mode: "rpc",
+		commandContextActions: {
+			waitForIdle: () => target.agent.waitForIdle(),
+			newSession: async (options) => runtimeHost.newSession(options),
+			fork: async (entryId, forkOptions) => {
+				const result = await runtimeHost.fork(entryId, forkOptions);
+				return { cancelled: result.cancelled };
+			},
+			navigateTree: async (targetId, options) => {
+				const result = await target.navigateTree(targetId, {
+					summarize: options?.summarize,
+					customInstructions: options?.customInstructions,
+					replaceInstructions: options?.replaceInstructions,
+					label: options?.label,
+				});
+				return { cancelled: result.cancelled };
+			},
+			switchSession: async (sessionPath, options) => {
+				return runtimeHost.switchSession(sessionPath, options);
+			},
+			reload: async () => {
+				await target.reload();
+			},
+		},
+		shutdownHandler: () => {
+			shutdownRequested = true;
+		},
+		onError: (err) => {
+			output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
+		},
+		sendUserMessageToContext: (contextName, content, options) => {
+			void contextRouter?.(contextName)
+				.then((ctxSession) => ctxSession.sendUserMessage(content, options))
+				.catch(() => {});
+		},
+		sendMessageToContext: (contextName, message, options) => {
+			void contextRouter?.(contextName)
+				.then((ctxSession) => ctxSession.sendCustomMessage(message, options))
+				.catch(() => {});
+		},
+	});
+
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
-		await session.bindExtensions({
-			uiContext: createExtensionUIContext(),
-			mode: "rpc",
-			commandContextActions: {
-				waitForIdle: () => session.waitForIdle(),
-				newSession: async (options) => runtimeHost.newSession(options),
-				fork: async (entryId, forkOptions) => {
-					const result = await runtimeHost.fork(entryId, forkOptions);
-					return { cancelled: result.cancelled };
-				},
-				navigateTree: async (targetId, options) => {
-					const result = await session.navigateTree(targetId, {
-						summarize: options?.summarize,
-						customInstructions: options?.customInstructions,
-						replaceInstructions: options?.replaceInstructions,
-						label: options?.label,
-					});
-					return { cancelled: result.cancelled };
-				},
-				switchSession: async (sessionPath, options) => {
-					return runtimeHost.switchSession(sessionPath, options);
-				},
-				reload: async () => {
-					await session.reload();
-				},
-			},
-			shutdownHandler: () => {
-				shutdownRequested = true;
-			},
-			onError: (err) => {
-				output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
-			},
-		});
+		await session.bindExtensions(buildSessionBindings(session));
 
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
@@ -382,9 +405,57 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	await rebindSession();
 	registerSignalHandlers();
 
+	// Load persisted context name → session file mappings.
+	const contextsFilePath = join(session.sessionManager.getSessionDir(), "contexts.json");
+	if (existsSync(contextsFilePath)) {
+		try {
+			const saved = JSON.parse(readFileSync(contextsFilePath, "utf8")) as Record<string, string>;
+			for (const [name, path] of Object.entries(saved)) {
+				contextFiles.set(name, path);
+			}
+		} catch {
+			// Ignore malformed contexts.json
+		}
+	}
+
+	const getOrCreateContextSession = async (contextName: string): Promise<AgentSession> => {
+		const existing = contextSessions.get(contextName);
+		if (existing) return existing;
+
+		let ctxSession: AgentSession;
+		const savedPath = contextFiles.get(contextName);
+		if (savedPath && existsSync(savedPath)) {
+			ctxSession = await runtimeHost.loadIsolatedSession(savedPath);
+		} else {
+			ctxSession = await runtimeHost.createIsolatedSession();
+			ctxSession.setSessionName(contextName);
+		}
+
+		const sessionFile = ctxSession.sessionFile;
+		if (sessionFile) {
+			contextFiles.set(contextName, sessionFile);
+			writeFileSync(contextsFilePath, JSON.stringify(Object.fromEntries(contextFiles), null, 2));
+		}
+
+		const unsub = ctxSession.subscribe((event) => output({ ...event, context: contextName }));
+		contextUnsubscribers.set(contextName, unsub);
+		contextSessions.set(contextName, ctxSession);
+
+		// Bind extensions so the session's extension runner fires session_start
+		// and gets full bindings (UI, command actions, error handling, and the
+		// cross-context routing handlers used by extensions like pi-schedule-prompt).
+		// Without this, extensions like mcp-adapter never initialize their state
+		// and report "MCP not initialized" when called from this context.
+		await ctxSession.bindExtensions(buildSessionBindings(ctxSession));
+
+		return ctxSession;
+	};
+	contextRouter = getOrCreateContextSession;
+
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse | undefined> => {
 		const id = command.id;
+		const contextName = command.context;
 
 		switch (command.type) {
 			// =================================================================
@@ -394,8 +465,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "prompt": {
 				// Start prompt handling immediately, but emit the authoritative response only after
 				// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
+				const promptSession = contextName ? await getOrCreateContextSession(contextName) : session;
+				const ctx = contextName ? { context: contextName } : {};
 				let preflightSucceeded = false;
-				void session
+				void promptSession
 					.prompt(command.message, {
 						images: command.images,
 						streamingBehavior: command.streamingBehavior,
@@ -403,30 +476,33 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 						preflightResult: (didSucceed) => {
 							if (didSucceed) {
 								preflightSucceeded = true;
-								output(success(id, "prompt"));
+								output({ ...success(id, "prompt"), ...ctx });
 							}
 						},
 					})
 					.catch((e) => {
 						if (!preflightSucceeded) {
-							output(error(id, "prompt", e.message));
+							output({ ...error(id, "prompt", e.message), ...ctx });
 						}
 					});
 				return undefined;
 			}
 
 			case "steer": {
-				await session.steer(command.message, command.images);
+				const activeSession = contextName ? await getOrCreateContextSession(contextName) : session;
+				await activeSession.steer(command.message, command.images);
 				return success(id, "steer");
 			}
 
 			case "follow_up": {
-				await session.followUp(command.message, command.images);
+				const activeSession = contextName ? await getOrCreateContextSession(contextName) : session;
+				await activeSession.followUp(command.message, command.images);
 				return success(id, "follow_up");
 			}
 
 			case "abort": {
-				await session.abort();
+				const activeSession = contextName ? await getOrCreateContextSession(contextName) : session;
+				await activeSession.abort();
 				return success(id, "abort");
 			}
 
@@ -435,6 +511,28 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "new_session": {
+				if (contextName) {
+					// Replace context session with a fresh one.
+					const old = contextSessions.get(contextName);
+					if (old) {
+						contextUnsubscribers.get(contextName)?.();
+						contextUnsubscribers.delete(contextName);
+						old.dispose();
+						contextSessions.delete(contextName);
+						contextFiles.delete(contextName);
+					}
+					const fresh = await runtimeHost.createIsolatedSession();
+					fresh.setSessionName(contextName);
+					const sessionFile = fresh.sessionFile;
+					if (sessionFile) {
+						contextFiles.set(contextName, sessionFile);
+						writeFileSync(contextsFilePath, JSON.stringify(Object.fromEntries(contextFiles), null, 2));
+					}
+					const unsub = fresh.subscribe((event) => output({ ...event, context: contextName }));
+					contextUnsubscribers.set(contextName, unsub);
+					contextSessions.set(contextName, fresh);
+					return success(id, "new_session", { cancelled: false });
+				}
 				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
 				const result = await runtimeHost.newSession(options);
 				if (!result.cancelled) {
@@ -448,19 +546,21 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "get_state": {
+				const activeSession = contextName ? await getOrCreateContextSession(contextName) : session;
 				const state: RpcSessionState = {
-					model: session.model,
-					thinkingLevel: session.thinkingLevel,
-					isStreaming: session.isStreaming,
-					isCompacting: session.isCompacting,
-					steeringMode: session.steeringMode,
-					followUpMode: session.followUpMode,
-					sessionFile: session.sessionFile,
-					sessionId: session.sessionId,
-					sessionName: session.sessionName,
-					autoCompactionEnabled: session.autoCompactionEnabled,
-					messageCount: session.messages.length,
-					pendingMessageCount: session.pendingMessageCount,
+					model: activeSession.model,
+					thinkingLevel: activeSession.thinkingLevel,
+					isStreaming: activeSession.isStreaming,
+					isCompacting: activeSession.isCompacting,
+					steeringMode: activeSession.steeringMode,
+					followUpMode: activeSession.followUpMode,
+					sessionFile: activeSession.sessionFile,
+					sessionId: activeSession.sessionId,
+					sessionName: activeSession.sessionName,
+					autoCompactionEnabled: activeSession.autoCompactionEnabled,
+					messageCount: activeSession.messages.length,
+					pendingMessageCount: activeSession.pendingMessageCount,
+					context: contextName,
 				};
 				return success(id, "get_state", state);
 			}
@@ -533,7 +633,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "compact": {
-				const result = await session.compact(command.customInstructions);
+				const activeSession = contextName ? await getOrCreateContextSession(contextName) : session;
+				const result = await activeSession.compact(command.customInstructions);
 				return success(id, "compact", result);
 			}
 
@@ -593,7 +694,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "get_session_stats": {
-				const stats = session.getSessionStats();
+				const activeSession = contextName ? await getOrCreateContextSession(contextName) : session;
+				const stats = activeSession.getSessionStats();
 				return success(id, "get_session_stats", stats);
 			}
 
@@ -654,7 +756,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "get_last_assistant_text": {
-				const text = session.getLastAssistantText();
+				const activeSession = contextName ? await getOrCreateContextSession(contextName) : session;
+				const text = activeSession.getLastAssistantText();
 				return success(id, "get_last_assistant_text", { text });
 			}
 
@@ -663,7 +766,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				if (!name) {
 					return error(id, "set_session_name", "Session name cannot be empty");
 				}
-				session.setSessionName(name);
+				const activeSession = contextName ? await getOrCreateContextSession(contextName) : session;
+				activeSession.setSessionName(name);
 				return success(id, "set_session_name");
 			}
 
@@ -672,7 +776,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "get_messages": {
-				return success(id, "get_messages", { messages: session.messages });
+				const activeSession = contextName ? await getOrCreateContextSession(contextName) : session;
+				return success(id, "get_messages", { messages: activeSession.messages });
 			}
 
 			// =================================================================
@@ -735,6 +840,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		}
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
+		for (const unsub of contextUnsubscribers.values()) {
+			unsub();
+		}
+		for (const ctxSession of contextSessions.values()) {
+			ctxSession.dispose();
+		}
 		await runtimeHost.dispose();
 		detachInput();
 		process.stdin.pause();

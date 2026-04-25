@@ -2426,7 +2426,7 @@ async function generateModels() {
 		// OpenCode variants list Claude Sonnet 4/4.5 with 1M context, actual limit is 200K
 		if (
 			(candidate.provider === "opencode" || candidate.provider === "opencode-go") &&
-			(candidate.id === "claude-sonnet-4-5" || candidate.id === "claude-sonnet-4")
+			(candidate.id === "claude-sonnet-4-5" || candidate.id === "claude-sonnet-4.6")
 		) {
 			candidate.contextWindow = 200000;
 		}

@@ -370,6 +370,16 @@ function createExtensionAPI(
 			runtime.sendUserMessage(content, options);
 		},
 
+		sendUserMessageToContext(contextName, content, options): void {
+			runtime.assertActive();
+			runtime.sendUserMessageToContext?.(contextName, content, options);
+		},
+
+		sendMessageToContext(contextName, message, options): void {
+			runtime.assertActive();
+			runtime.sendMessageToContext?.(contextName, message as never, options);
+		},
+
 		retryLastTurn(): void {
 			runtime.retryLastTurn();
 		},

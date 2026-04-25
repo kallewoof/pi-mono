@@ -395,6 +395,37 @@ export class AgentSessionRuntime {
 		return { cancelled: false };
 	}
 
+	/**
+	 * Create a fresh AgentSession in the same session directory without replacing
+	 * the current session. Used for named context sessions in RPC mode.
+	 */
+	async createIsolatedSession(): Promise<AgentSession> {
+		const sessionDir = this.session.sessionManager.getSessionDir();
+		const sessionManager = SessionManager.create(this.cwd, sessionDir);
+		const result = await this.createRuntime({
+			cwd: this.cwd,
+			agentDir: this.services.agentDir,
+			sessionManager,
+			sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile: undefined },
+		});
+		return result.session;
+	}
+
+	/**
+	 * Load an existing session by file path as an isolated AgentSession without
+	 * replacing the current session. Used to resume named context sessions in RPC mode.
+	 */
+	async loadIsolatedSession(sessionPath: string): Promise<AgentSession> {
+		const sessionManager = SessionManager.open(sessionPath);
+		const result = await this.createRuntime({
+			cwd: sessionManager.getCwd(),
+			agentDir: this.services.agentDir,
+			sessionManager,
+			sessionStartEvent: { type: "session_start", reason: "resume", previousSessionFile: undefined },
+		});
+		return result.session;
+	}
+
 	async dispose(): Promise<void> {
 		await emitSessionShutdownEvent(this.session.extensionRunner, {
 			type: "session_shutdown",

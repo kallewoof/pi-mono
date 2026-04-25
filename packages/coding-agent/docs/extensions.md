@@ -997,6 +997,23 @@ Returns whether project-local trust is active for the current session context. T
 
 Use this before reading project-local extension configuration that should only be honored for trusted projects.
 
+### ctx.context
+
+The RPC context name when the handler/tool was invoked from a named context session (multi-context RPC mode), or `undefined` when running on the main session. See [MULTICONTEXT.md](MULTICONTEXT.md) for how named context sessions work.
+
+Use this to attach the originating conversation to extension state — for example, when the agent schedules a future prompt or queues a deferred task, persisting `ctx.context` lets the extension later route the result back to the same context via `pi.sendUserMessageToContext` / `pi.sendMessageToContext`.
+
+```typescript
+pi.registerTool({
+  name: "schedule",
+  // ...
+  execute: async (_id, params, _signal, _onUpdate, ctx) => {
+    storage.add({ ...job, targetContext: ctx?.context });
+    return "Scheduled.";
+  },
+});
+```
+
 ### ctx.sessionManager
 
 Read-only access to session state. See [Session Format](session-format.md) for the full SessionManager API and entry types.
@@ -1467,6 +1484,34 @@ pi.sendUserMessage("/review src/index.ts", { expandPromptTemplates: true });
 When not streaming, the message is sent immediately and triggers a new turn. When streaming without `deliverAs`, throws an error.
 
 See [send-user-message.ts](../examples/extensions/send-user-message.ts) for a complete example.
+
+### pi.sendUserMessageToContext(contextName, content, options?)
+
+Send a user message into a named **context session** instead of the current session. The targeted context session is created on-demand if it does not yet exist. Behaves exactly like `pi.sendUserMessage` (always triggers a turn, accepts the same `deliverAs` options) but on the routed session.
+
+Only available when running in multi-context RPC mode. In other modes the call is a no-op.
+
+```typescript
+// Fire-back path: a job created from the "Family" context completes elsewhere,
+// then the result is steered back into the Family conversation thread.
+pi.sendUserMessageToContext("Family", "Reminder: dinner is at 7pm.");
+```
+
+See [MULTICONTEXT.md](MULTICONTEXT.md) for context-session semantics.
+
+### pi.sendMessageToContext(contextName, message, options?)
+
+Inject a custom message into a named context session. Mirrors `pi.sendMessage` but routes to the specified context. Useful for surfacing display-only annotations (e.g. "Scheduled prompt fired") in a different conversation than the caller.
+
+Only available in multi-context RPC mode; otherwise a no-op.
+
+```typescript
+pi.sendMessageToContext("Family", {
+  customType: "scheduled_prompt",
+  content: "Daily summary fired",
+  display: true,
+});
+```
 
 ### pi.appendEntry(customType, data?)
 

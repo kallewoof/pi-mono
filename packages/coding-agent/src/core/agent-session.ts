@@ -80,6 +80,8 @@ import {
 	type MessageStartEvent,
 	type MessageUpdateEvent,
 	type ReplacedSessionContext,
+	type SendMessageToContextHandler,
+	type SendUserMessageToContextHandler,
 	type SessionBeforeCompactResult,
 	type SessionBeforeTreeResult,
 	type SessionCompactFailedEvent,
@@ -237,6 +239,10 @@ export interface ExtensionBindings {
 	abortHandler?: () => void;
 	shutdownHandler?: ShutdownHandler;
 	onError?: ExtensionErrorListener;
+	/** Route sendUserMessageToContext calls to a named RPC context session. */
+	sendUserMessageToContext?: SendUserMessageToContextHandler;
+	/** Route sendMessageToContext calls to a named RPC context session. */
+	sendMessageToContext?: SendMessageToContextHandler;
 }
 
 /** Options for AgentSession.prompt() */
@@ -2503,6 +2509,12 @@ export class AgentSession {
 		}
 		if (bindings.onError !== undefined) {
 			this._extensionErrorListener = bindings.onError;
+		}
+		if (bindings.sendUserMessageToContext !== undefined) {
+			this._extensionRunner.setSendUserMessageToContext(bindings.sendUserMessageToContext);
+		}
+		if (bindings.sendMessageToContext !== undefined) {
+			this._extensionRunner.setSendMessageToContext(bindings.sendMessageToContext);
 		}
 
 		this._applyExtensionBindings(this._extensionRunner);

@@ -4,6 +4,8 @@ RPC mode enables headless operation of the coding agent via a JSON protocol over
 
 **Note for Node.js/TypeScript users**: If you're building a Node.js application, consider using `AgentSession` directly from `@earendil-works/pi-coding-agent` instead of spawning a subprocess. See [`src/core/agent-session.ts`](../src/core/agent-session.ts) for the API. For a subprocess-based TypeScript client, see [`src/modes/rpc/rpc-client.ts`](../src/modes/rpc/rpc-client.ts).
 
+**Multiple independent conversations in one process**: RPC mode supports a `"context"` field on commands to route messages to named, isolated sessions. This is useful for messenger bridges or any multi-tenant use case. See [MULTICONTEXT.md](./MULTICONTEXT.md).
+
 ## Starting RPC Mode
 
 ```bash
