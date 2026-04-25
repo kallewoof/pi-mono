@@ -4,6 +4,8 @@ RPC mode runs Pi as a long-lived subprocess controlled through JSON records on s
 
 For an in-process Node.js or Bun integration, prefer the [SDK](sdk.md). For a subprocess-based TypeScript integration, prefer the exported `RpcClient`, which starts Pi, correlates responses, exposes typed command methods, and delivers events to listeners.
 
+**Multiple independent conversations in one process**: RPC mode supports a `"context"` field on commands to route messages to named, isolated sessions. This is useful for messenger bridges or any multi-tenant use case. See [MULTICONTEXT.md](./MULTICONTEXT.md).
+
 | Interface | Process boundary | Control model | Best fit |
 |---|---|---|---|
 | [SDK](sdk.md) | In process | Direct TypeScript methods and events | Node.js or Bun hosts that want complete API access |

@@ -199,32 +199,33 @@ export class RpcClient {
 		message: string,
 		images?: ImageContent[],
 		streamingBehavior?: "steer" | "followUp",
+		context?: string,
 	): Promise<PromptDisposition> {
-		const response = await this.send({ type: "prompt", message, images, streamingBehavior });
+		const response = await this.send({ type: "prompt", message, images, streamingBehavior, context });
 		return this.getData<{ disposition: PromptDisposition }>(response).disposition;
 	}
 
 	/**
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
-	async steer(message: string, images?: ImageContent[]): Promise<QueuedInputDisposition> {
-		const response = await this.send({ type: "steer", message, images });
+	async steer(message: string, images?: ImageContent[], context?: string): Promise<QueuedInputDisposition> {
+		const response = await this.send({ type: "steer", message, images, context });
 		return this.getData<{ disposition: QueuedInputDisposition }>(response).disposition;
 	}
 
 	/**
 	 * Queue a follow-up message to be processed after the agent finishes.
 	 */
-	async followUp(message: string, images?: ImageContent[]): Promise<QueuedInputDisposition> {
-		const response = await this.send({ type: "follow_up", message, images });
+	async followUp(message: string, images?: ImageContent[], context?: string): Promise<QueuedInputDisposition> {
+		const response = await this.send({ type: "follow_up", message, images, context });
 		return this.getData<{ disposition: QueuedInputDisposition }>(response).disposition;
 	}
 
 	/**
 	 * Abort current operation.
 	 */
-	async abort(): Promise<void> {
-		await this.send({ type: "abort" });
+	async abort(context?: string): Promise<void> {
+		await this.send({ type: "abort", context });
 	}
 
 	/**
@@ -248,8 +249,8 @@ export class RpcClient {
 	/**
 	 * Get current session state.
 	 */
-	async getState(): Promise<RpcSessionState> {
-		const response = await this.send({ type: "get_state" });
+	async getState(context?: string): Promise<RpcSessionState> {
+		const response = await this.send({ type: "get_state", context });
 		return this.getData(response);
 	}
 
@@ -321,8 +322,8 @@ export class RpcClient {
 	/**
 	 * Compact session context.
 	 */
-	async compact(customInstructions?: string): Promise<CompactionResult> {
-		const response = await this.send({ type: "compact", customInstructions });
+	async compact(customInstructions?: string, context?: string): Promise<CompactionResult> {
+		const response = await this.send({ type: "compact", customInstructions, context });
 		return this.getData(response);
 	}
 
@@ -365,8 +366,8 @@ export class RpcClient {
 	/**
 	 * Get session statistics.
 	 */
-	async getSessionStats(): Promise<SessionStats> {
-		const response = await this.send({ type: "get_session_stats" });
+	async getSessionStats(context?: string): Promise<SessionStats> {
+		const response = await this.send({ type: "get_session_stats", context });
 		return this.getData(response);
 	}
 
@@ -432,23 +433,23 @@ export class RpcClient {
 	/**
 	 * Get text of last assistant message.
 	 */
-	async getLastAssistantText(): Promise<string | null> {
-		const response = await this.send({ type: "get_last_assistant_text" });
+	async getLastAssistantText(context?: string): Promise<string | null> {
+		const response = await this.send({ type: "get_last_assistant_text", context });
 		return this.getData<{ text: string | null }>(response).text;
 	}
 
 	/**
 	 * Set the session display name.
 	 */
-	async setSessionName(name: string): Promise<void> {
-		await this.send({ type: "set_session_name", name });
+	async setSessionName(name: string, context?: string): Promise<void> {
+		await this.send({ type: "set_session_name", name, context });
 	}
 
 	/**
 	 * Get all messages in the session.
 	 */
-	async getMessages(): Promise<AgentMessage[]> {
-		const response = await this.send({ type: "get_messages" });
+	async getMessages(context?: string): Promise<AgentMessage[]> {
+		const response = await this.send({ type: "get_messages", context });
 		return this.getData<{ messages: AgentMessage[] }>(response).messages;
 	}
 

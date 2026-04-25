@@ -76,6 +76,8 @@ import type {
 	ResolvedCommand,
 	ResourcesDiscoverEvent,
 	ResourcesDiscoverResult,
+	SendMessageToContextHandler,
+	SendUserMessageToContextHandler,
 	SessionBeforeCompactResult,
 	SessionBeforeForkResult,
 	SessionBeforeSwitchResult,
@@ -574,6 +576,14 @@ export class ExtensionRunner {
 		this.reloadHandler = async () => {};
 	}
 
+	setSendUserMessageToContext(fn: SendUserMessageToContextHandler | undefined): void {
+		this.runtime.sendUserMessageToContext = fn;
+	}
+
+	setSendMessageToContext(fn: SendMessageToContextHandler | undefined): void {
+		this.runtime.sendMessageToContext = fn;
+	}
+
 	setUIContext(uiContext?: ExtensionUIContext, mode: ExtensionMode = "print"): void {
 		this.uiContext = uiContext ? this.wrapUIPromptContext(uiContext) : noOpUIContext;
 		this.mode = mode;
@@ -913,6 +923,9 @@ export class ExtensionRunner {
 			get cwd() {
 				runner.assertActive();
 				return runner.cwd;
+			},
+			get context() {
+				return runner.runtime.getSessionName();
 			},
 			get sessionManager() {
 				runner.assertActive();

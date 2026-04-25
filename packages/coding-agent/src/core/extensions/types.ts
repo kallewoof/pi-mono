@@ -352,6 +352,8 @@ export interface ExtensionContext {
 	hasUI: boolean;
 	/** Current working directory */
 	cwd: string;
+	/** RPC context name when called from a named context session (e.g. Signal thread); undefined for main session. */
+	context?: string;
 	/** Session manager (read-only) */
 	sessionManager: ReadonlySessionManager;
 	/** Model registry for API key resolution */
@@ -1793,6 +1795,26 @@ export interface ExtensionAPI {
 	): void;
 
 	/**
+	 * Send a user message to a named RPC context session.
+	 * No-op when the runtime has no context router (non-RPC modes).
+	 */
+	sendUserMessageToContext(
+		contextName: string,
+		content: string | (TextContent | ImageContent)[],
+		options?: { deliverAs?: "steer" | "followUp" },
+	): void;
+
+	/**
+	 * Send a custom message to a named RPC context session.
+	 * No-op when the runtime has no context router (non-RPC modes).
+	 */
+	sendMessageToContext<T = unknown>(
+		contextName: string,
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	): void;
+
+	/**
 	 * Retry the last turn without re-injecting the user message.
 	 * Drops the trailing error assistant message and re-runs the agent loop from
 	 * the existing context. Use this instead of sendUserMessage when retrying
@@ -2170,6 +2192,18 @@ export type SendUserMessageHandler = (
 	options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
 ) => void;
 
+export type SendUserMessageToContextHandler = (
+	contextName: string,
+	content: string | (TextContent | ImageContent)[],
+	options?: { deliverAs?: "steer" | "followUp" },
+) => void;
+
+export type SendMessageToContextHandler = <T = unknown>(
+	contextName: string,
+	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+) => void;
+
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
 export type SetSessionNameHandler = (name: string) => void;
@@ -2229,6 +2263,10 @@ export interface ExtensionRuntimeState {
 	invalidate: (message?: string) => void;
 	/** Retain an event-bus subscription until this runtime is invalidated. */
 	trackEventBusSubscription: (unsubscribe: () => void) => () => void;
+	/** Optional: routes sendUserMessageToContext calls to a named context session. Set by RPC mode. */
+	sendUserMessageToContext?: SendUserMessageToContextHandler;
+	/** Optional: routes sendMessageToContext calls to a named context session. Set by RPC mode. */
+	sendMessageToContext?: SendMessageToContextHandler;
 	/**
 	 * Report an error thrown by a `pi.events` handler. Dropped before the runner exists; the runner
 	 * replaces this to call its emitError() until the runner is invalidated.
