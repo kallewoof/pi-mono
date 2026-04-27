@@ -20,10 +20,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { createInMemoryModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 // Allow many process-level listeners (one SIGTERM/SIGHUP/stdin "end" per runRpcMode call per test).
@@ -145,7 +145,7 @@ interface RuntimeHostResult {
 	cleanup: () => Promise<void>;
 }
 
-function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostOptions): RuntimeHostResult {
+async function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostOptions): Promise<RuntimeHostResult> {
 	const tempDir = join(tmpdir(), `pi-rpc-ctx-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(tempDir, { recursive: true });
 	mkdirSync(sessionsDir, { recursive: true });
@@ -155,9 +155,10 @@ function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostOptions
 
 	const settingsManager = SettingsManager.create(tempDir, tempDir);
 	const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-	const modelRegistry = ModelRegistry.create(authStorage, tempDir);
+	const modelRegistry = await createInMemoryModelRegistry(authStorage);
+	const modelRuntime = getModelRuntime(modelRegistry);
 	if (options.withAuth) {
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		await modelRuntime.setRuntimeApiKey("anthropic", "test-key");
 	}
 
 	function makeMockStream(): MockAssistantStream {
@@ -186,7 +187,7 @@ function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostOptions
 		sessionManager: mainSessionManager,
 		settingsManager,
 		cwd: tempDir,
-		modelRegistry,
+		modelRuntime,
 		resourceLoader: createTestResourceLoader(),
 	});
 
@@ -206,7 +207,7 @@ function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostOptions
 				sessionManager: sm,
 				settingsManager,
 				cwd: tempDir,
-				modelRegistry,
+				modelRuntime,
 				resourceLoader: createTestResourceLoader(),
 			});
 			createdSessions.push(s);
@@ -219,7 +220,7 @@ function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostOptions
 				sessionManager: sm,
 				settingsManager,
 				cwd: tempDir,
-				modelRegistry,
+				modelRuntime,
 				resourceLoader: createTestResourceLoader(),
 			});
 			createdSessions.push(s);
@@ -255,7 +256,7 @@ async function startRpcModeInDir(
 	rpcIo.outputLines = [];
 	rpcIo.lineHandler = undefined;
 
-	const { runtimeHost, cleanup } = createRuntimeHostInDir(sessionsDir, options);
+	const { runtimeHost, cleanup } = await createRuntimeHostInDir(sessionsDir, options);
 	void runRpcMode(runtimeHost);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
@@ -840,9 +841,9 @@ describe("RPC multi-context", () => {
 			const mapping = JSON.parse(readFileSync(contextsFile, "utf8")) as Record<string, string>;
 			expect(Object.keys(mapping)).toContain("Alpha");
 			expect(Object.keys(mapping)).toContain("Beta");
-			expect(mapping["Alpha"]).toMatch(/\.jsonl$/);
-			expect(mapping["Beta"]).toMatch(/\.jsonl$/);
-			expect(mapping["Alpha"]).not.toBe(mapping["Beta"]);
+			expect(mapping.Alpha).toMatch(/\.jsonl$/);
+			expect(mapping.Beta).toMatch(/\.jsonl$/);
+			expect(mapping.Alpha).not.toBe(mapping.Beta);
 		} finally {
 			await cleanup();
 		}
@@ -857,7 +858,7 @@ describe("RPC multi-context", () => {
 
 			const contextsFile = join(sessionsDir, "contexts.json");
 			const mappingBefore = JSON.parse(readFileSync(contextsFile, "utf8")) as Record<string, string>;
-			const pathBefore = mappingBefore["Renewable"];
+			const pathBefore = mappingBefore.Renewable;
 			expect(pathBefore).toBeDefined();
 
 			// Replace the context session
@@ -871,7 +872,7 @@ describe("RPC multi-context", () => {
 			await vi.waitFor(waitForResponse("cj-r2"));
 
 			const mappingAfter = JSON.parse(readFileSync(contextsFile, "utf8")) as Record<string, string>;
-			const pathAfter = mappingAfter["Renewable"];
+			const pathAfter = mappingAfter.Renewable;
 			expect(pathAfter).toBeDefined();
 			expect(pathAfter).not.toBe(pathBefore); // new session → new file path
 		} finally {

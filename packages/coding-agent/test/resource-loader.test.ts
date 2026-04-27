@@ -404,6 +404,32 @@ Content`,
 			expect(agentsFiles).toEqual([]);
 		});
 
+		it("should skip context file excluded by .piignore in the same directory", async () => {
+			writeFileSync(join(cwd, "CLAUDE.md"), "# Guidelines");
+			writeFileSync(join(cwd, ".piignore"), "CLAUDE.md\n");
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			const { agentsFiles } = loader.getAgentsFiles();
+			expect(agentsFiles.some((f) => f.path.endsWith("CLAUDE.md"))).toBe(false);
+		});
+
+		it("should skip context file excluded by .piignore in an ancestor directory", async () => {
+			const parentDir = join(tempDir, "ancestor");
+			const childCwd = join(parentDir, "project");
+			mkdirSync(childCwd, { recursive: true });
+
+			writeFileSync(join(parentDir, "CLAUDE.md"), "# Ancestor Guidelines");
+			writeFileSync(join(parentDir, ".piignore"), "CLAUDE.md\n");
+
+			const loader = new DefaultResourceLoader({ cwd: childCwd, agentDir });
+			await loader.reload();
+
+			const { agentsFiles } = loader.getAgentsFiles();
+			expect(agentsFiles.some((f) => f.path === join(parentDir, "CLAUDE.md"))).toBe(false);
+		});
+
 		it("should discover SYSTEM.md from cwd/.pi", async () => {
 			const piDir = join(cwd, ".pi");
 			mkdirSync(piDir, { recursive: true });

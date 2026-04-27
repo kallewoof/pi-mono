@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import chalk from "chalk";
+import ignore from "ignore";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { loadThemeFromPath, type Theme } from "../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
@@ -69,8 +70,17 @@ function resolvePromptInput(input: string | undefined, description: string): str
 }
 
 function loadContextFileFromDir(dir: string): { path: string; content: string } | null {
+	const ig = ignore();
+	const piIgnorePath = join(dir, ".piignore");
+	if (existsSync(piIgnorePath)) {
+		try {
+			ig.add(readFileSync(piIgnorePath, "utf-8"));
+		} catch {}
+	}
+
 	const candidates = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
 	for (const filename of candidates) {
+		if (ig.ignores(filename)) continue;
 		const filePath = join(dir, filename);
 		if (existsSync(filePath)) {
 			try {

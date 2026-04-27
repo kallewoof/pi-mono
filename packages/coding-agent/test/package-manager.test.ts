@@ -555,6 +555,26 @@ Content`,
 			expect(result.skills.some((r) => r.path.includes("venv") && r.enabled)).toBe(false);
 		});
 
+		it("should respect .piignore in skill directories", async () => {
+			const skillsDir = join(agentDir, "skills");
+			mkdirSync(skillsDir, { recursive: true });
+			writeFileSync(join(skillsDir, ".piignore"), "hidden\n");
+
+			const goodSkillDir = join(skillsDir, "good-skill");
+			mkdirSync(goodSkillDir, { recursive: true });
+			writeFileSync(join(goodSkillDir, "SKILL.md"), "---\nname: good-skill\ndescription: Good\n---\nContent");
+
+			const ignoredSkillDir = join(skillsDir, "hidden", "secret-skill");
+			mkdirSync(ignoredSkillDir, { recursive: true });
+			writeFileSync(join(ignoredSkillDir, "SKILL.md"), "---\nname: secret-skill\ndescription: Secret\n---\nContent");
+
+			settingsManager.setSkillPaths(["skills"]);
+
+			const result = await packageManager.resolve();
+			expect(result.skills.some((r) => r.path.includes("good-skill") && r.enabled)).toBe(true);
+			expect(result.skills.some((r) => r.path.includes("hidden") && r.enabled)).toBe(false);
+		});
+
 		it("should not apply parent .gitignore to .pi auto-discovery", async () => {
 			writeFileSync(join(tempDir, ".gitignore"), ".pi\n");
 
