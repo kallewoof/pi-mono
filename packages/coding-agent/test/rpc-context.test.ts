@@ -11,8 +11,8 @@ import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
-	type AssistantMessageEvent,
-	EventStream,
+	type AssistantMessageEventStream,
+	createAssistantMessageEventStream,
 	getModel,
 	type Model,
 } from "@earendil-works/pi-ai/compat";
@@ -20,10 +20,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { createInMemoryModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 // Allow many process-level listeners (one SIGTERM/SIGHUP/stdin "end" per runRpcMode call per test).
@@ -61,19 +61,6 @@ vi.mock("../src/modes/rpc/jsonl.js", () => ({
 // ============================================================================
 // Mock stream helpers
 // ============================================================================
-
-class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
-	constructor() {
-		super(
-			(event) => event.type === "done" || event.type === "error",
-			(event) => {
-				if (event.type === "done") return event.message;
-				if (event.type === "error") return event.error;
-				throw new Error("Unexpected event type");
-			},
-		);
-	}
-}
 
 function createAssistantMessage(text: string): AssistantMessage {
 	return {
@@ -116,6 +103,12 @@ function getResponseData(response: ParsedLine): ParsedLine {
 	return (response.data ?? {}) as ParsedLine;
 }
 
+/** Messages from a get_messages response, without system messages (the prompt lives in the transcript). */
+function conversationMessages(response: ParsedLine): ParsedLine[] {
+	const messages = (getResponseData(response).messages as ParsedLine[] | undefined) ?? [];
+	return messages.filter((message) => message.role !== "system");
+}
+
 function waitForResponse(id: string): () => void {
 	return () => {
 		expect(getResponseById(rpcIo.outputLines, id)).toBeDefined();
@@ -145,7 +138,7 @@ interface RuntimeHostResult {
 	cleanup: () => Promise<void>;
 }
 
-function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostOptions): RuntimeHostResult {
+async function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostOptions): Promise<RuntimeHostResult> {
 	const tempDir = join(tmpdir(), `pi-rpc-ctx-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(tempDir, { recursive: true });
 	mkdirSync(sessionsDir, { recursive: true });
@@ -155,13 +148,14 @@ function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostOptions
 
 	const settingsManager = SettingsManager.create(tempDir, tempDir);
 	const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-	const modelRegistry = ModelRegistry.create(authStorage, tempDir);
+	const modelRegistry = await createInMemoryModelRegistry(authStorage);
+	const modelRuntime = getModelRuntime(modelRegistry);
 	if (options.withAuth) {
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		await modelRuntime.setRuntimeApiKey("anthropic", "test-key");
 	}
 
-	function makeMockStream(): MockAssistantStream {
-		const stream = new MockAssistantStream();
+	function makeMockStream(): AssistantMessageEventStream {
+		const stream = createAssistantMessageEventStream();
 		queueMicrotask(() => {
 			stream.push({ type: "start", partial: createAssistantMessage("") });
 			setTimeout(() => {
@@ -186,7 +180,7 @@ function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostOptions
 		sessionManager: mainSessionManager,
 		settingsManager,
 		cwd: tempDir,
-		modelRegistry,
+		modelRuntime,
 		resourceLoader: createTestResourceLoader(),
 	});
 
@@ -206,7 +200,7 @@ function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostOptions
 				sessionManager: sm,
 				settingsManager,
 				cwd: tempDir,
-				modelRegistry,
+				modelRuntime,
 				resourceLoader: createTestResourceLoader(),
 			});
 			createdSessions.push(s);
@@ -219,7 +213,7 @@ function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostOptions
 				sessionManager: sm,
 				settingsManager,
 				cwd: tempDir,
-				modelRegistry,
+				modelRuntime,
 				resourceLoader: createTestResourceLoader(),
 			});
 			createdSessions.push(s);
@@ -255,7 +249,7 @@ async function startRpcModeInDir(
 	rpcIo.outputLines = [];
 	rpcIo.lineHandler = undefined;
 
-	const { runtimeHost, cleanup } = createRuntimeHostInDir(sessionsDir, options);
+	const { runtimeHost, cleanup } = await createRuntimeHostInDir(sessionsDir, options);
 	void runRpcMode(runtimeHost);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
@@ -629,12 +623,11 @@ describe("RPC multi-context", () => {
 			lineHandler(JSON.stringify({ id: "ns-msg-reset", type: "new_session", context: "MsgCtx" }));
 			await vi.waitFor(waitForResponse("ns-msg-reset"));
 
-			// Fresh session should have zero messages
+			// Fresh session should have no conversation (the leading system message is the prompt)
 			rpcIo.outputLines = [];
-			lineHandler(JSON.stringify({ id: "ns-msg-after", type: "get_state", context: "MsgCtx" }));
+			lineHandler(JSON.stringify({ id: "ns-msg-after", type: "get_messages", context: "MsgCtx" }));
 			await vi.waitFor(waitForResponse("ns-msg-after"));
-			const afterCount = getResponseData(getResponseById(rpcIo.outputLines, "ns-msg-after")!).messageCount as number;
-			expect(afterCount).toBe(0);
+			expect(conversationMessages(getResponseById(rpcIo.outputLines, "ns-msg-after")!)).toHaveLength(0);
 		} finally {
 			await cleanup();
 		}
@@ -687,9 +680,7 @@ describe("RPC multi-context", () => {
 			rpcIo.outputLines = [];
 			lineHandler(JSON.stringify({ id: "gm-def", type: "get_messages" }));
 			await vi.waitFor(waitForResponse("gm-def"));
-			const defMessages =
-				(getResponseData(getResponseById(rpcIo.outputLines, "gm-def")!).messages as unknown[]) ?? [];
-			expect(defMessages.length).toBe(0);
+			expect(conversationMessages(getResponseById(rpcIo.outputLines, "gm-def")!)).toHaveLength(0);
 		} finally {
 			await cleanup();
 		}
@@ -840,9 +831,9 @@ describe("RPC multi-context", () => {
 			const mapping = JSON.parse(readFileSync(contextsFile, "utf8")) as Record<string, string>;
 			expect(Object.keys(mapping)).toContain("Alpha");
 			expect(Object.keys(mapping)).toContain("Beta");
-			expect(mapping["Alpha"]).toMatch(/\.jsonl$/);
-			expect(mapping["Beta"]).toMatch(/\.jsonl$/);
-			expect(mapping["Alpha"]).not.toBe(mapping["Beta"]);
+			expect(mapping.Alpha).toMatch(/\.jsonl$/);
+			expect(mapping.Beta).toMatch(/\.jsonl$/);
+			expect(mapping.Alpha).not.toBe(mapping.Beta);
 		} finally {
 			await cleanup();
 		}
@@ -857,7 +848,7 @@ describe("RPC multi-context", () => {
 
 			const contextsFile = join(sessionsDir, "contexts.json");
 			const mappingBefore = JSON.parse(readFileSync(contextsFile, "utf8")) as Record<string, string>;
-			const pathBefore = mappingBefore["Renewable"];
+			const pathBefore = mappingBefore.Renewable;
 			expect(pathBefore).toBeDefined();
 
 			// Replace the context session
@@ -871,7 +862,7 @@ describe("RPC multi-context", () => {
 			await vi.waitFor(waitForResponse("cj-r2"));
 
 			const mappingAfter = JSON.parse(readFileSync(contextsFile, "utf8")) as Record<string, string>;
-			const pathAfter = mappingAfter["Renewable"];
+			const pathAfter = mappingAfter.Renewable;
 			expect(pathAfter).toBeDefined();
 			expect(pathAfter).not.toBe(pathBefore); // new session → new file path
 		} finally {

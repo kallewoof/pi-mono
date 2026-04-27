@@ -286,7 +286,7 @@ const FILE_PATTERNS: Record<ResourceType, RegExp> = {
 	themes: /\.json$/,
 };
 
-const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore"];
+const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore", ".piignore"];
 
 type IgnoreMatcher = ReturnType<typeof ignore>;
 

@@ -13,7 +13,7 @@ const MAX_NAME_LENGTH = 64;
 /** Max description length per spec */
 const MAX_DESCRIPTION_LENGTH = 1024;
 
-const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore"];
+const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore", ".piignore"];
 
 type IgnoreMatcher = ReturnType<typeof ignore>;
 

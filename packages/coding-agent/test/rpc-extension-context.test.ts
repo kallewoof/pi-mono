@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@earendil-works/pi-ai/compat";
+import { createAssistantMessageEventStream, getModel } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -64,6 +64,7 @@ const extensionActions: ExtensionActions = {
 	setModel: async () => false,
 	getThinkingLevel: () => "off",
 	setThinkingLevel: () => {},
+	getSettings: () => ({}),
 };
 
 const extensionContextActions: ExtensionContextActions = {
@@ -82,19 +83,6 @@ const extensionContextActions: ExtensionContextActions = {
 
 // ─── Mock agent (no real LLM calls) ─────────────────────────────────────────
 
-class MockStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
-	constructor() {
-		super(
-			(event) => event.type === "done" || event.type === "error",
-			(event) => {
-				if (event.type === "done") return event.message;
-				if (event.type === "error") return event.error;
-				throw new Error("unexpected");
-			},
-		);
-	}
-}
-
 function createMockAgent(): Agent {
 	const model = getModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("test model not found");
@@ -102,7 +90,7 @@ function createMockAgent(): Agent {
 		getApiKey: () => "test-key",
 		initialState: { model, systemPrompt: "test", tools: [] },
 		streamFn: () => {
-			const s = new MockStream();
+			const s = createAssistantMessageEventStream();
 			queueMicrotask(() => {
 				s.push({
 					type: "done",
