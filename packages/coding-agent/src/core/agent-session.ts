@@ -442,6 +442,7 @@ export class AgentSession {
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
+	private _autoCompactionPromise: Promise<boolean> | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
 
 	// Branch summarization state
@@ -3321,6 +3322,27 @@ export class AgentSession {
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+		// Coalesce re-entrant calls. An in-flight auto-compaction can overlap with
+		// the pre-prompt compaction check on the next prompt(); without this guard
+		// both invocations compact the same branch and race on
+		// _autoCompactionAbortController (the first's finally clears the field while
+		// the second is still running). Awaiting (rather than returning immediately)
+		// ensures the second caller's post-await code observes the compacted session,
+		// e.g. so prompt() sends the next user message against the compacted context.
+		if (this._autoCompactionPromise) {
+			return await this._autoCompactionPromise;
+		}
+
+		const run = this._doRunAutoCompaction(reason, willRetry);
+		this._autoCompactionPromise = run;
+		try {
+			return await run;
+		} finally {
+			this._autoCompactionPromise = undefined;
+		}
+	}
+
+	private async _doRunAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings(model);
 		let abortController: AbortController | undefined;
