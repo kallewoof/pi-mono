@@ -4026,9 +4026,69 @@ export class InteractiveMode {
 		try {
 			this.ui.stop();
 		} catch {}
+		try {
+			this.writeCrashDump(error);
+		} catch {}
 		console.error(`${APP_NAME} exiting due to uncaughtException:`);
 		console.error(error);
 		process.exit(1);
+	}
+
+	/**
+	 * Synchronously merge a session-side dump into ./failure.json. If exec.ts
+	 * already wrote an overflow record there, we preserve it and add a `session`
+	 * key. Otherwise we create the file with just the session context.
+	 *
+	 * Bounded: head + tail of messages and per-message content length, so the
+	 * dump itself can't overflow the same string limit that killed the process.
+	 */
+	private writeCrashDump(error: Error): void {
+		const failurePath = path.resolve(process.cwd(), "failure.json");
+		const HEAD_N = 30;
+		const TAIL_N = 30;
+		const MAX_CONTENT_CHARS = 8 * 1024;
+
+		const messages = this.session.state.messages as readonly unknown[];
+		const total = messages.length;
+		const summarize = (m: unknown): unknown => {
+			try {
+				const json = JSON.stringify(m);
+				if (json.length <= MAX_CONTENT_CHARS) return JSON.parse(json);
+				return {
+					_truncated: true,
+					_originalLen: json.length,
+					head: json.slice(0, MAX_CONTENT_CHARS / 2),
+					tail: json.slice(-MAX_CONTENT_CHARS / 2),
+				};
+			} catch (e) {
+				return { _stringifyError: e instanceof Error ? e.message : String(e) };
+			}
+		};
+		const headMsgs = messages.slice(0, HEAD_N).map(summarize);
+		const tailMsgs = total > HEAD_N + TAIL_N ? messages.slice(-TAIL_N).map(summarize) : [];
+		const sessionDump = {
+			totalMessages: total,
+			truncated: total > HEAD_N + TAIL_N,
+			head: headMsgs,
+			tail: tailMsgs,
+		};
+
+		let existing: Record<string, unknown> = {};
+		try {
+			const prior = fs.readFileSync(failurePath, "utf8");
+			const parsed = JSON.parse(prior) as unknown;
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+				existing = parsed as Record<string, unknown>;
+			}
+		} catch {}
+
+		const merged = {
+			...existing,
+			crashTimestamp: new Date().toISOString(),
+			error: { name: error.name, message: error.message, stack: error.stack },
+			session: sessionDump,
+		};
+		fs.writeFileSync(failurePath, JSON.stringify(merged, null, 2));
 	}
 
 	/**
