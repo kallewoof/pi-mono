@@ -21,8 +21,11 @@ function writeExecFailureDump(
 	stream: "stdout" | "stderr",
 	error: unknown,
 ): void {
+	const HEAD_BYTES = 64 * 1024;
 	const TAIL_BYTES = 64 * 1024;
-	const tail = (s: string): string => (s.length > TAIL_BYTES ? s.slice(-TAIL_BYTES) : s);
+	const head = (s: string): string => (s.length > HEAD_BYTES ? s.slice(0, HEAD_BYTES) : s);
+	const tail = (s: string): string =>
+		s.length > HEAD_BYTES + TAIL_BYTES ? s.slice(-TAIL_BYTES) : s.length > HEAD_BYTES ? s.slice(HEAD_BYTES) : "";
 	const record = {
 		kind: "execCommand-overflow",
 		timestamp: new Date().toISOString(),
@@ -32,7 +35,9 @@ function writeExecFailureDump(
 		overflowedStream: stream,
 		stdoutLen: stdout.length,
 		stderrLen: stderr.length,
+		stdoutHead: head(stdout),
 		stdoutTail: tail(stdout),
+		stderrHead: head(stderr),
 		stderrTail: tail(stderr),
 		error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error),
 	};
