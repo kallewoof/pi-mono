@@ -132,6 +132,7 @@ export interface Settings {
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
 	outputPad?: 0 | 1; // Horizontal padding for chat message output (default: 1)
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
+	maxWidgetLines?: number; // Max lines rendered per extension/hook widget before "... (widget truncated)" (default: 100)
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
@@ -1340,6 +1341,20 @@ export class SettingsManager {
 	setAutocompleteMaxVisible(maxVisible: number): void {
 		this.globalSettings.autocompleteMaxVisible = Math.max(3, Math.min(20, Math.floor(maxVisible)));
 		this.markModified("autocompleteMaxVisible");
+		this.save();
+	}
+
+	getMaxWidgetLines(): number {
+		const value = this.settings.maxWidgetLines;
+		if (typeof value !== "number" || !Number.isFinite(value)) {
+			return 100;
+		}
+		return Math.max(1, Math.floor(value));
+	}
+
+	setMaxWidgetLines(maxLines: number): void {
+		this.globalSettings.maxWidgetLines = Math.max(1, Math.floor(maxLines));
+		this.markModified("maxWidgetLines");
 		this.save();
 	}
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `maxWidgetLines` setting to configure how many lines an extension/hook widget renders before `... (widget truncated)` (default: 100). See [Settings](docs/settings.md).
+
 ## [0.84.4] - 2026-08-28
 
 ### New Features
