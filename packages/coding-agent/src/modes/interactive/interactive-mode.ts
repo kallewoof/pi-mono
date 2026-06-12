@@ -2565,11 +2565,12 @@ export class InteractiveMode {
 
 		if (Array.isArray(content)) {
 			// Wrap string array in a Container with Text components
+			const maxWidgetLines = this.settingsManager.getMaxWidgetLines();
 			const container = new Container();
-			for (const line of content.slice(0, InteractiveMode.MAX_WIDGET_LINES)) {
+			for (const line of content.slice(0, maxWidgetLines)) {
 				container.addChild(new Text(line, 1, 0));
 			}
-			if (content.length > InteractiveMode.MAX_WIDGET_LINES) {
+			if (content.length > maxWidgetLines) {
 				container.addChild(new ThemedText(() => theme.fg("muted", "... (widget truncated)"), 1, 0));
 			}
 			component = container;
@@ -2627,9 +2628,6 @@ export class InteractiveMode {
 		}
 		this.setHiddenThinkingLabel();
 	}
-
-	// Maximum total widget lines to prevent viewport overflow
-	private static readonly MAX_WIDGET_LINES = 10;
 
 	/**
 	 * Render all extension widgets to the widget container.

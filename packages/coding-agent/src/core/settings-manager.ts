@@ -1428,6 +1428,20 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getMaxWidgetLines(): number {
+		const value = this.settings.maxWidgetLines;
+		if (typeof value !== "number" || !Number.isFinite(value)) {
+			return SETTINGS_DEFAULTS.maxWidgetLines;
+		}
+		return Math.max(1, Math.floor(value));
+	}
+
+	setMaxWidgetLines(maxLines: number): void {
+		this.globalSettings.maxWidgetLines = Math.max(1, Math.floor(maxLines));
+		this.markModified("maxWidgetLines");
+		this.save();
+	}
+
 	getCodeBlockIndent(): string {
 		return this.settings.markdown?.codeBlockIndent ?? SETTINGS_DEFAULTS.markdown.codeBlockIndent;
 	}

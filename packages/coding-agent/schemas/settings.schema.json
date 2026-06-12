@@ -584,6 +584,11 @@
       "description": "Maximum visible items in the autocomplete dropdown.",
       "default": 5
     },
+    "maxWidgetLines": {
+      "type": "number",
+      "description": "Maximum lines rendered per extension widget before \"... (widget truncated)\".",
+      "default": 100
+    },
     "showHardwareCursor": {
       "type": "boolean",
       "description": "Show the terminal cursor while still positioning it for IME."

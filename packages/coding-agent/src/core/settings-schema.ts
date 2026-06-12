@@ -392,6 +392,12 @@ export const SettingsSchema = Type.Object(
 				default: SETTINGS_DEFAULTS.autocompleteMaxVisible,
 			}),
 		),
+		maxWidgetLines: Type.Optional(
+			Type.Number({
+				description: 'Maximum lines rendered per extension widget before "... (widget truncated)".',
+				default: SETTINGS_DEFAULTS.maxWidgetLines,
+			}),
+		),
 		showHardwareCursor: Type.Optional(
 			Type.Boolean({ description: "Show the terminal cursor while still positioning it for IME." }),
 		),
