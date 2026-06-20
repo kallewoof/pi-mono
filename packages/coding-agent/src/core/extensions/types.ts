@@ -1441,6 +1441,14 @@ export interface ExtensionAPI {
 	/** Get available slash commands in the current session. */
 	getCommands(): SlashCommandInfo[];
 
+	/**
+	 * Whether the agent for this session is idle (not currently streaming a turn).
+	 * Authoritative — reads the live session state, unlike event-mirrored flags an
+	 * extension might maintain. Useful for long-lived extensions (e.g. schedulers)
+	 * that hold `pi` but have no per-call `ctx` to read `ctx.isIdle()` from.
+	 */
+	isIdle(): boolean;
+
 	// =========================================================================
 	// Model and Thinking Level
 	// =========================================================================
@@ -1719,6 +1727,8 @@ export interface ExtensionRuntimeState {
 	invalidate: (message?: string) => void;
 	/** Retain an event-bus subscription until this runtime is invalidated. */
 	trackEventBusSubscription: (unsubscribe: () => void) => () => void;
+	/** Whether the agent for the bound session is idle. Defaults to `() => true` pre-bind; set by bindCore(). */
+	isIdle: () => boolean;
 	/** Optional: routes sendUserMessageToContext calls to a named context session. Set by RPC mode. */
 	sendUserMessageToContext?: SendUserMessageToContextHandler;
 	/** Optional: routes sendMessageToContext calls to a named context session. Set by RPC mode. */

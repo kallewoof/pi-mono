@@ -346,6 +346,10 @@ export class ExtensionRunner {
 		this.getModel = contextActions.getModel;
 		this.getScopedModels = contextActions.getScopedModels;
 		this.isIdleFn = contextActions.isIdle;
+		// Also surface idle state on the shared runtime so the pi.* API
+		// (ExtensionAPI.isIdle) can report it — extensions holding a long-lived
+		// `pi` (e.g. background schedulers) have no `ctx` to read isIdle from.
+		this.runtime.isIdle = contextActions.isIdle;
 		this.isProjectTrustedFn = contextActions.isProjectTrusted;
 		this.getSignalFn = contextActions.getSignal;
 		this.abortFn = contextActions.abort;

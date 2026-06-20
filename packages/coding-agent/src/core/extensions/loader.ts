@@ -205,6 +205,9 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		setModel: () => Promise.reject(new Error("Extension runtime not initialized")),
 		getThinkingLevel: notInitialized,
 		setThinkingLevel: notInitialized,
+		// Safe pre-bind default (mirrors ExtensionRunner.isIdleFn): assume idle
+		// until bindCore() wires the session's real streaming state.
+		isIdle: () => true,
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
 		pendingNativeProviderRegistrations: [],
@@ -427,6 +430,11 @@ function createExtensionAPI(
 		getCommands() {
 			assertActive();
 			return runtime.getCommands();
+		},
+
+		isIdle(): boolean {
+			runtime.assertActive();
+			return runtime.isIdle();
 		},
 
 		setModel(model) {
