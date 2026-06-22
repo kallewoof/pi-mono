@@ -3,50 +3,17 @@
  */
 
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
 import { waitForChildProcess } from "../utils/child-process.ts";
 
 /**
- * Tail-and-write a diagnostic record when a stdout/stderr concatenation
- * overflows V8's max string length (~512 MB). Synchronous so the buffers
- * are still in scope when the host's uncaughtException handler runs.
+ * Default ceiling for captured stdout/stderr, in UTF-16 code units. A runaway
+ * child (e.g. a nested `pi --mode json` stuck in a loop) can emit hundreds of
+ * MB; concatenating past V8's max string length (2**29 - 1 ≈ 512 MB) throws
+ * `RangeError: Invalid string length`. That throw used to escape the stream's
+ * "data" handler as an uncaughtException and kill the whole host process. We
+ * cap well below the limit so the host stays alive and the producer is killed.
  */
-function writeExecFailureDump(
-	command: string,
-	args: string[],
-	cwd: string,
-	stdout: string,
-	stderr: string,
-	stream: "stdout" | "stderr",
-	error: unknown,
-): void {
-	const HEAD_BYTES = 64 * 1024;
-	const TAIL_BYTES = 64 * 1024;
-	const head = (s: string): string => (s.length > HEAD_BYTES ? s.slice(0, HEAD_BYTES) : s);
-	const tail = (s: string): string =>
-		s.length > HEAD_BYTES + TAIL_BYTES ? s.slice(-TAIL_BYTES) : s.length > HEAD_BYTES ? s.slice(HEAD_BYTES) : "";
-	const record = {
-		kind: "execCommand-overflow",
-		timestamp: new Date().toISOString(),
-		command,
-		args,
-		cwd,
-		overflowedStream: stream,
-		stdoutLen: stdout.length,
-		stderrLen: stderr.length,
-		stdoutHead: head(stdout),
-		stdoutTail: tail(stdout),
-		stderrHead: head(stderr),
-		stderrTail: tail(stderr),
-		error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error),
-	};
-	try {
-		writeFileSync(resolvePath(process.cwd(), "failure.json"), JSON.stringify(record, null, 2));
-	} catch {
-		// Best-effort: if even the dump fails, let the rethrow surface upstream.
-	}
-}
+const DEFAULT_MAX_OUTPUT_CHARS = 256 * 1024 * 1024;
 
 /**
  * Options for executing shell commands.
@@ -58,6 +25,11 @@ export interface ExecOptions {
 	timeout?: number;
 	/** Working directory */
 	cwd?: string;
+	/**
+	 * Maximum captured characters per stream (stdout/stderr) before output is
+	 * truncated and the child is killed. Defaults to {@link DEFAULT_MAX_OUTPUT_CHARS}.
+	 */
+	maxBuffer?: number;
 }
 
 /**
@@ -68,6 +40,8 @@ export interface ExecResult {
 	stderr: string;
 	code: number;
 	killed: boolean;
+	/** True if either stream hit `maxBuffer` and was truncated (child was killed). */
+	truncated?: boolean;
 }
 
 /**
@@ -90,7 +64,11 @@ export async function execCommand(
 		let stdout = "";
 		let stderr = "";
 		let killed = false;
+		let truncated = false;
 		let timeoutId: NodeJS.Timeout | undefined;
+
+		const maxBuffer = options?.maxBuffer ?? DEFAULT_MAX_OUTPUT_CHARS;
+		const TRUNCATION_MARKER = "\n[output truncated: exceeded maxBuffer; process killed]\n";
 
 		const killProcess = () => {
 			if (!killed) {
@@ -121,22 +99,25 @@ export async function execCommand(
 			}, options.timeout);
 		}
 
+		// Accumulate a chunk while keeping the buffer strictly under `maxBuffer`
+		// (and thus under V8's max string length). On the first overflow we keep
+		// the head, append a marker, flag truncation, and kill the child so a
+		// runaway producer cannot keep streaming. Subsequent chunks are dropped.
+		const appendBounded = (current: string, chunk: string): string => {
+			if (truncated) return current;
+			if (current.length + chunk.length <= maxBuffer) return current + chunk;
+			const remaining = Math.max(0, maxBuffer - current.length);
+			truncated = true;
+			killProcess();
+			return current + chunk.slice(0, remaining) + TRUNCATION_MARKER;
+		};
+
 		proc.stdout?.on("data", (data) => {
-			try {
-				stdout += data.toString();
-			} catch (err) {
-				writeExecFailureDump(command, args, cwd, stdout, stderr, "stdout", err);
-				throw err;
-			}
+			stdout = appendBounded(stdout, data.toString());
 		});
 
 		proc.stderr?.on("data", (data) => {
-			try {
-				stderr += data.toString();
-			} catch (err) {
-				writeExecFailureDump(command, args, cwd, stdout, stderr, "stderr", err);
-				throw err;
-			}
+			stderr = appendBounded(stderr, data.toString());
 		});
 
 		// Wait for process termination without hanging on inherited stdio handles
@@ -147,14 +128,14 @@ export async function execCommand(
 				if (options?.signal) {
 					options.signal.removeEventListener("abort", killProcess);
 				}
-				resolve({ stdout, stderr, code: code ?? 0, killed });
+				resolve({ stdout, stderr, code: code ?? 0, killed, truncated });
 			})
 			.catch((_err) => {
 				if (timeoutId) clearTimeout(timeoutId);
 				if (options?.signal) {
 					options.signal.removeEventListener("abort", killProcess);
 				}
-				resolve({ stdout, stderr, code: 1, killed });
+				resolve({ stdout, stderr, code: 1, killed, truncated });
 			});
 	});
 }
