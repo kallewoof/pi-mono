@@ -344,7 +344,18 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 			.map((error) => `  - ${formatValidationPath(error)}: ${error.message}`)
 			.join("\n") || "Unknown validation error";
 
-	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${errors}\n\nReceived arguments:\n${JSON.stringify(toolCall.arguments, null, 2)}`;
+	const truncatedArgs: Record<string, any> = {};
+	for (const key of Object.keys(toolCall.arguments)) {
+		const value = toolCall.arguments[key];
+		truncatedArgs[key] =
+			typeof value === "string"
+				? value.length < 50
+					? value
+					: `${value.substring(0, 42)}...(+${value.length - 42}b)`
+				: value;
+	}
+
+	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${errors}\n\nReceived arguments:\n${JSON.stringify(truncatedArgs, null, 2)}`;
 
 	throw new Error(errorMessage);
 }
