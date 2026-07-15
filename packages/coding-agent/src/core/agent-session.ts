@@ -151,6 +151,7 @@ import {
 } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
+import { createPatchToolDefinition, hasLargeArgument, type LastToolCall, PATCH_RETRY_HINT } from "./tools/patch.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, combineUsage, createUsageTotals } from "./usage-totals.ts";
 import {
@@ -519,6 +520,8 @@ export class AgentSession {
 	/** Declared tools whose declarations requests leave out, from `prepareLoadout` hooks. */
 	private _hiddenDeclarations: ReadonlySet<string> = new Set();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
+	// Most recent non-patch tool call, used by the `patch` tool to retry with merged arguments.
+	private _lastToolCall?: LastToolCall;
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
@@ -757,6 +760,20 @@ export class AgentSession {
 		{ toolCall, args, result, isError }: AfterToolCallContext,
 		parentToolCallId?: string,
 	): Promise<AfterToolCallResult | undefined> {
+		// Remember the most recent top-level tool call so the `patch` tool can retry it with
+		// merged arguments. Patch calls dispatch the target tool themselves and update
+		// _lastToolCall.args directly, so skip recording them here. Nested calls made by
+		// another tool are not the model's own and are not retried.
+		let hintedContent = result.content;
+		if (!parentToolCallId && toolCall.name !== "patch") {
+			this._lastToolCall = { name: toolCall.name, args: (args ?? {}) as Record<string, unknown> };
+			// On failure, if the call carried a large argument and patch is available, advertise
+			// a cheap retry instead of the model resending the whole payload.
+			if (isError && this._toolRegistry.has("patch") && hasLargeArgument(args)) {
+				hintedContent = [...hintedContent, { type: "text", text: PATCH_RETRY_HINT }];
+			}
+		}
+
 		const runner = this._extensionRunner;
 		const hookResult = runner.hasHandlers("tool_result")
 			? await runner.emitToolResult({
@@ -765,7 +782,7 @@ export class AgentSession {
 					toolCallId: toolCall.id,
 					...(parentToolCallId ? { parentToolCallId } : {}),
 					input: args as Record<string, unknown>,
-					content: result.content,
+					content: hintedContent,
 					details: result.details,
 					...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
 					isError,
@@ -773,7 +790,7 @@ export class AgentSession {
 				})
 			: undefined;
 
-		const content = hookResult?.content ?? result.content ?? [];
+		const content = hookResult?.content ?? hintedContent ?? [];
 		// Runs after the extension hook so images injected or replaced by extensions are normalized too.
 		const resizeOptions = this._limitsModel()?.inputLimits?.images?.resize;
 		const normalizedContent = await normalizeToolResultImages(content, {
@@ -781,7 +798,8 @@ export class AgentSession {
 			...(resizeOptions ? { resizeOptions } : {}),
 		});
 
-		if (!hookResult && normalizedContent === content) {
+		// The patch retry hint also counts as a change.
+		if (!hookResult && hintedContent === result.content && normalizedContent === content) {
 			return undefined;
 		}
 
@@ -3891,6 +3909,21 @@ export class AgentSession {
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
 
+		// The patch tool retries the most recent tool call with a subset of its arguments replaced.
+		// It reaches the live tool registry and last-call state through these closures.
+		if (!this._baseToolsOverride) {
+			const patchTool = createPatchToolDefinition({
+				getLastToolCall: () => this._lastToolCall,
+				resolveTool: (name) => this._toolRegistry.get(name),
+				setLastToolArgs: (args) => {
+					if (this._lastToolCall) {
+						this._lastToolCall.args = args;
+					}
+				},
+			});
+			this._baseToolDefinitions.set(patchTool.name, patchTool as ToolDefinition);
+		}
+
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
 			for (const [name, value] of options.flagValues) {
@@ -3913,7 +3946,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+			: ["read", "bash", "edit", "write", "patch"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

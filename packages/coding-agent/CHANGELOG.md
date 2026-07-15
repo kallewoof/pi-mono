@@ -10,6 +10,7 @@
 
 - Added `deepseek-v4.1-flash` and `deepseek-v4.1-flash-1017` to the Qwen Token Plan Individual providers, and per-plan key variables `QWEN_TOKEN_PLAN_TEAM_API_KEY`, `QWEN_TOKEN_PLAN_TEAM_CN_API_KEY`, `QWEN_TOKEN_PLAN_INDIVIDUAL_API_KEY`, and `QWEN_TOKEN_PLAN_INDIVIDUAL_CN_API_KEY`; the shared `QWEN_TOKEN_PLAN_API_KEY` and `QWEN_TOKEN_PLAN_CN_API_KEY` still work ([#11773](https://github.com/earendil-works/pi/issues/11773))
 - Added `maxWidgetLines` setting to configure how many lines an extension/hook widget renders before `... (widget truncated)` (default: 100). See [Settings](docs/settings.md).
+- Added a `patch` tool that retries the most recent tool call with only the given arguments replaced, so models can recover from small mistakes (wrong path, stray flag, typo) without resending large arguments such as file contents. When a tool call fails and carried a large argument, the error result now advertises this retry path.
 
 ### Changed
 
