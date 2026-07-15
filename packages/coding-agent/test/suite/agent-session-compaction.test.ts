@@ -11,6 +11,7 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { estimateTokens } from "../../src/core/compaction/index.ts";
+import type { ExtensionFactory } from "../../src/index.ts";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 
 type SessionWithCompactionInternals = {
@@ -885,81 +886,76 @@ describe("AgentSession compaction characterization", () => {
 		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
 	});
 
-	it("does not emit agent_end to extensions during overflow recovery (compaction + retry)", async () => {
-		vi.useFakeTimers();
+	// A heavy assistant response so the later overflow has real history to compact.
+	// With the default keepRecentTokens the tiny fixtures would all fit and prepareCompaction
+	// would be a no-op, so compaction would never run and there would be nothing to assert.
+	const heavyText = (label: string) => `${label} ${"x".repeat(4000)}`;
+	const compactionSettings = { compaction: { reserveTokens: 100, keepRecentTokens: 200 } };
+	const summarizeOnCompact = (pi: Parameters<ExtensionFactory>[0], onAgentEnd: () => void) => {
+		pi.on("agent_end", async () => {
+			onAgentEnd();
+		});
+		pi.on("session_before_compact", async (event) => ({
+			compaction: {
+				summary: "test compaction",
+				firstKeptEntryId: event.preparation.firstKeptEntryId,
+				tokensBefore: event.preparation.tokensBefore,
+				details: {},
+			},
+		}));
+	};
 
+	it("does not emit agent_end to extensions during overflow recovery (compaction + retry)", async () => {
 		let agentEndCount = 0;
 		const harness = await createHarness({
-			extensionFactories: [
-				(pi) => {
-					pi.on("agent_end", async () => {
-						agentEndCount++;
-					});
-					pi.on("session_before_compact", async (event) => ({
-						compaction: {
-							summary: "test compaction",
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-							details: {},
-						},
-					}));
-				},
-			],
+			settings: compactionSettings,
+			extensionFactories: [(pi) => summarizeOnCompact(pi, () => agentEndCount++)],
 		});
 		harnesses.push(harness);
 
-		// Normal completion — agent_end should fire to extensions
-		harness.setResponses([fauxAssistantMessage("done")]);
+		// Normal completion — agent_end fires to extensions.
+		harness.setResponses([fauxAssistantMessage(heavyText("done"))]);
 		await harness.session.prompt("do something");
 		await (harness.session as any)._agentEventQueue;
 		expect(agentEndCount).toBe(1);
 
-		// Overflow recovery — agent_end must NOT fire; agent will retry after compaction
+		// Overflow — agent_end must NOT fire; the agent compacts and retries (inline). Mock
+		// continue() so the retry itself is a no-op: this test asserts only that the overflow
+		// turn's agent_end is suppressed and that compaction ran with willRetry.
 		vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
 		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" })]);
 		await harness.session.prompt("do more");
 		await (harness.session as any)._agentEventQueue;
 
-		expect(agentEndCount).toBe(1); // unchanged — overflow is not a task completion
+		expect(agentEndCount).toBe(1); // unchanged — overflow recovery is not a task completion
 		const [compactionEnd] = harness.eventsOfType("compaction_end");
 		expect(compactionEnd?.willRetry).toBe(true);
 	});
 
 	it("emits agent_end to extensions when overflow recovery retry also overflows", async () => {
-		vi.useFakeTimers();
-
 		let agentEndCount = 0;
 		const harness = await createHarness({
-			extensionFactories: [
-				(pi) => {
-					pi.on("agent_end", async () => {
-						agentEndCount++;
-					});
-					pi.on("session_before_compact", async (event) => ({
-						compaction: {
-							summary: "test compaction",
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-							details: {},
-						},
-					}));
-				},
-			],
+			settings: compactionSettings,
+			extensionFactories: [(pi) => summarizeOnCompact(pi, () => agentEndCount++)],
 		});
 		harnesses.push(harness);
 
-		// First overflow — agent_end suppressed, compaction runs, retry scheduled at +100ms
-		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" })]);
-		await harness.session.prompt("do something");
+		// Seed heavy history so the overflow has something to compact, then count only the
+		// agent_end events produced by the overflow sequence itself.
+		harness.setResponses([fauxAssistantMessage(heavyText("warm up"))]);
+		await harness.session.prompt("establish history");
 		await (harness.session as any)._agentEventQueue;
-		expect(agentEndCount).toBe(0);
+		agentEndCount = 0;
 
-		// Retry fires after 100ms — but context overflows again
-		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" })]);
-		await vi.advanceTimersByTimeAsync(200);
+		// First overflow -> agent_end suppressed, compaction runs, retry runs inline. The retry
+		// also overflows -> recovery is exhausted -> agent_end IS delivered exactly once.
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
+		]);
+		await harness.session.prompt("do the work");
 		await (harness.session as any)._agentEventQueue;
 
-		// Second overflow: recovery already exhausted, so agent_end IS delivered to extensions
 		expect(agentEndCount).toBe(1);
 	});
 
