@@ -563,6 +563,14 @@ export class AgentSession {
 				usage: hookResult?.usage,
 			};
 		};
+
+		// Bail out of the tool loop when a turn is truncated by the output-token limit
+		// because the input context is full. Left to run, the loop would keep failing
+		// truncated tool calls and re-prompting into the same clamped budget (empty-arg
+		// tool calls, single tokens). Stopping here hands control to the post-run
+		// compaction check, which compacts and retries against a smaller context.
+		this.agent.shouldStopAfterTurn = ({ message }) =>
+			message.stopReason === "length" && isContextOverflow(message, this.model?.contextWindow ?? 0);
 	}
 
 	private async _compactBeforeNextAssistantResponse(context: AgentContext): Promise<AgentContext> {
