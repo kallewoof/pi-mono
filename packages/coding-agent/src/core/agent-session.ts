@@ -112,6 +112,7 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
+import { createPatchToolDefinition, hasLargeArgument, type LastToolCall, PATCH_RETRY_HINT } from "./tools/patch.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 
@@ -381,6 +382,8 @@ export class AgentSession {
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
+	// Most recent non-patch tool call, used by the `patch` tool to retry with merged arguments.
+	private _lastToolCall?: LastToolCall;
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
@@ -514,6 +517,20 @@ export class AgentSession {
 		};
 
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
+			// Remember the most recent real tool call so the `patch` tool can retry it with
+			// merged arguments. Patch calls dispatch the target tool themselves and update
+			// _lastToolCall.args directly, so skip recording them here.
+			if (toolCall.name !== "patch") {
+				this._lastToolCall = { name: toolCall.name, args: (args ?? {}) as Record<string, unknown> };
+			}
+
+			// On failure, if the call carried a large argument and patch is available, advertise
+			// a cheap retry instead of the model resending the whole payload.
+			let hintedContent = result.content;
+			if (isError && toolCall.name !== "patch" && this._toolRegistry.has("patch") && hasLargeArgument(args)) {
+				hintedContent = [...hintedContent, { type: "text", text: PATCH_RETRY_HINT }];
+			}
+
 			const runner = this._extensionRunner;
 			const hookResult = runner.hasHandlers("tool_result")
 				? await runner.emitToolResult({
@@ -521,20 +538,21 @@ export class AgentSession {
 						toolName: toolCall.name,
 						toolCallId: toolCall.id,
 						input: args as Record<string, unknown>,
-						content: result.content,
+						content: hintedContent,
 						details: result.details,
 						isError,
 						usage: result.usage,
 					})
 				: undefined;
 
-			const content = hookResult?.content ?? result.content ?? [];
+			const content = hookResult?.content ?? hintedContent ?? [];
 			// Runs after the extension hook so images injected or replaced by extensions are normalized too.
 			const normalizedContent = await normalizeToolResultImages(content, {
 				autoResizeImages: this.settingsManager.getImageAutoResize(),
 			});
 
-			if (!hookResult && normalizedContent === content) {
+			// The patch retry hint also counts as a change, so compare against the raw tool result.
+			if (!hookResult && normalizedContent === result.content) {
 				return undefined;
 			}
 
@@ -2871,6 +2889,21 @@ export class AgentSession {
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
 
+		// The patch tool retries the most recent tool call with a subset of its arguments replaced.
+		// It reaches the live tool registry and last-call state through these closures.
+		if (!this._baseToolsOverride) {
+			const patchTool = createPatchToolDefinition({
+				getLastToolCall: () => this._lastToolCall,
+				resolveTool: (name) => this._toolRegistry.get(name),
+				setLastToolArgs: (args) => {
+					if (this._lastToolCall) {
+						this._lastToolCall.args = args;
+					}
+				},
+			});
+			this._baseToolDefinitions.set(patchTool.name, patchTool as ToolDefinition);
+		}
+
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
 			for (const [name, value] of options.flagValues) {
@@ -2893,7 +2926,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+			: ["read", "bash", "edit", "write", "patch"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

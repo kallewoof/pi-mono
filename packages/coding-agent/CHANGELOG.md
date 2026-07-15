@@ -5,6 +5,7 @@
 ### Added
 
 - Added `maxWidgetLines` setting to configure how many lines an extension/hook widget renders before `... (widget truncated)` (default: 100). See [Settings](docs/settings.md).
+- Added a `patch` tool that retries the most recent tool call with only the given arguments replaced, so models can recover from small mistakes (wrong path, stray flag, typo) without resending large arguments such as file contents. When a tool call fails and carried a large argument, the error result now advertises this retry path.
 
 ## [0.84.4] - 2026-08-28
 
