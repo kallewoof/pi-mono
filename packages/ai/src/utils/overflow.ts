@@ -1,3 +1,4 @@
+import { CONTEXT_SAFETY_TOKENS } from "../api/simple-options.ts";
 import type { AssistantMessage } from "../types.ts";
 
 /**
@@ -149,12 +150,15 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
 		}
 	}
 
-	// Case 3: Length-stop overflow (Xiaomi MiMo style) - server truncates oversized input
-	// to fit the context window, leaving no room for output. Returns stopReason "length"
-	// with output=0 and input+cacheRead filling the context window.
-	if (contextWindow && message.stopReason === "length" && message.usage.output === 0) {
+	// Case 3: Length-stop overflow - the input context leaves no usable room for output.
+	// clampMaxTokensToContext reserves CONTEXT_SAFETY_TOKENS, so once input+cacheRead crosses
+	// (contextWindow - CONTEXT_SAFETY_TOKENS) the output budget is already clamped to ~1 and a
+	// length stop is inevitable. This holds whether the server truncated with no output at all
+	// (Xiaomi MiMo style) or a token or two leaked out before truncation (e.g. a partial tool
+	// call), so it must not require output === 0.
+	if (contextWindow && message.stopReason === "length") {
 		const inputTokens = message.usage.input + message.usage.cacheRead;
-		if (inputTokens >= contextWindow * 0.99) {
+		if (inputTokens >= contextWindow - CONTEXT_SAFETY_TOKENS) {
 			return true;
 		}
 	}

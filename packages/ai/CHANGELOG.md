@@ -251,6 +251,7 @@
 - Fixed OpenAI Codex WebSocket sessions to retry once without a missing previous-response continuation after `previous_response_not_found` errors ([#6955](https://github.com/earendil-works/pi/pull/6955) by [@davidbrai](https://github.com/davidbrai)).
 - Fixed OpenAI and Anthropic provider retry waits to honor abort signals and configured delay limits ([#6980](https://github.com/earendil-works/pi/pull/6980) by [@petrroll](https://github.com/petrroll)).
 - Fixed OpenRouter Anthropic cache breakpoints to advance through tool results and enabled cache control for `~anthropic/*-latest` aliases ([#6941](https://github.com/earendil-works/pi/pull/6941) by [@mteam88](https://github.com/mteam88)).
+- Fixed `isContextOverflow` to detect a `length` (output-token-limit) stop as a context overflow whenever `input + cacheRead` reaches `contextWindow - CONTEXT_SAFETY_TOKENS` — the same reserve `clampMaxTokensToContext` uses. Previously it only matched when `output === 0` and input filled ≥99% of the window, so a real truncation that leaked a token or two (e.g. a partial tool call) or hit the wall slightly below 99% went undetected, leaving the agent to spin on truncated responses instead of compacting.
 
 ## [0.81.1] - 2026-07-21
 
