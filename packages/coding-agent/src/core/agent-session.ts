@@ -2483,13 +2483,18 @@ export class AgentSession {
 			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 
 			if (willRetry) {
+				// Drop the trailing overflow assistant message so continue() has a
+				// user/tool-result tail to re-run against the compacted context. The
+				// rebuild above (agent.state.messages = sessionContext.messages) re-adds
+				// the message that _checkCompaction trimmed pre-compaction, so we must
+				// re-trim here. Overflow recovery reaches this branch for both the
+				// provider-error variant (stopReason "error") and the truncated-output
+				// variant (stopReason "length"); the earlier code only trimmed "error",
+				// so a "length" text response was left as the tail and continue() threw
+				// "Cannot continue from message role: assistant". Mirror the unconditional
+				// pre-compaction trim in _checkCompaction and drop any trailing assistant.
 				const messages = this.agent.state.messages;
-				const lastMsg = messages[messages.length - 1];
-				// The overflow response was persisted on message_end before _checkCompaction() removed it
-				// from agent state. Rebuilding state from the new compaction can restore that kept entry,
-				// leaving an assistant as the final message. agent.continue() rejects that state, so remove
-				// the retriable error or truncated-length response again before continuing the interrupted turn.
-				if (lastMsg?.role === "assistant" && (lastMsg.stopReason === "error" || lastMsg.stopReason === "length")) {
+				if (messages[messages.length - 1]?.role === "assistant") {
 					this.agent.state.messages = messages.slice(0, -1);
 				}
 				return true;
