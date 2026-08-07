@@ -321,6 +321,29 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	// Lazy ref to avoid TDZ: getOrCreateContextSession is defined after the first rebindSession call.
 	let contextRouter: ((name: string) => Promise<AgentSession>) | undefined;
 
+	// Resolve a named context session and run `action` against it. These calls are
+	// fire-and-forget from the extension's perspective — it gets no promise back
+	// and cannot observe a rejection — so a failure here is the last chance to say
+	// anything about it. Report to stderr (stdout is the RPC protocol channel)
+	// rather than discarding: a silently dropped cross-context send is invisible
+	// from both sides and indistinguishable from the extension never firing.
+	const routeToContext = async (
+		contextName: string,
+		operation: string,
+		action: (ctxSession: AgentSession) => Promise<void>,
+	): Promise<void> => {
+		if (!contextRouter) {
+			console.error(`[rpc] ${operation}(${contextName}) dropped: no context router bound`);
+			return;
+		}
+		try {
+			await action(await contextRouter(contextName));
+		} catch (err) {
+			const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
+			console.error(`[rpc] ${operation}(${contextName}) failed: ${message}`);
+		}
+	};
+
 	runtimeHost.setRebindSession(async () => {
 		await rebindSession();
 	});
@@ -358,14 +381,25 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
 		},
 		sendUserMessageToContext: (contextName, content, options) => {
-			void contextRouter?.(contextName)
-				.then((ctxSession) => ctxSession.sendUserMessage(content, options))
-				.catch(() => {});
+			void routeToContext(contextName, "sendUserMessageToContext", (ctxSession) =>
+				ctxSession.sendUserMessage(content, options),
+			);
 		},
 		sendMessageToContext: (contextName, message, options) => {
-			void contextRouter?.(contextName)
-				.then((ctxSession) => ctxSession.sendCustomMessage(message, options))
-				.catch(() => {});
+			void routeToContext(contextName, "sendMessageToContext", async (ctxSession) => {
+				// A custom message with no explicit delivery mode is a notification
+				// bound for the RPC client (e.g. pi-schedule-prompt reporting a
+				// command-mode job's output). sendCustomMessage only emits the
+				// message_start/message_end pair the client needs when the session is
+				// idle; mid-run it steers the message into the agent, which emits it
+				// only if the turn goes on to carry it — and drops it outright when
+				// the run is already unwinding. Wait for the run to settle first so
+				// delivery does not depend on that race.
+				if (options?.deliverAs === undefined && !options?.triggerTurn && ctxSession.isStreaming) {
+					await ctxSession.waitForIdle();
+				}
+				await ctxSession.sendCustomMessage(message, options);
+			});
 		},
 	});
 

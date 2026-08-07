@@ -375,12 +375,24 @@ function createExtensionAPI(
 
 		sendUserMessageToContext(contextName, content, options): void {
 			runtime.assertActive();
-			runtime.sendUserMessageToContext?.(contextName, content, options);
+			if (!runtime.sendUserMessageToContext) {
+				console.error(`[extensions] sendUserMessageToContext(${contextName}) dropped: not bound by this mode`);
+				return;
+			}
+			runtime.sendUserMessageToContext(contextName, content, options);
 		},
 
 		sendMessageToContext(contextName, message, options): void {
 			runtime.assertActive();
-			runtime.sendMessageToContext?.(contextName, message as never, options);
+			// Only RPC mode binds this. Extensions feature-detect with
+			// `typeof pi.sendMessageToContext === "function"`, which always passes —
+			// that tests this wrapper, not the binding — so an unbound handler used
+			// to make the send vanish with no trace on either side.
+			if (!runtime.sendMessageToContext) {
+				console.error(`[extensions] sendMessageToContext(${contextName}) dropped: not bound by this mode`);
+				return;
+			}
+			runtime.sendMessageToContext(contextName, message as never, options);
 		},
 
 		retryLastTurn(): void {

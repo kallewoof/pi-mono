@@ -442,4 +442,60 @@ describe("AgentSession queue characterization", () => {
 
 		expect(getUserTexts(harness)).toEqual(["hello", "conflict report"]);
 	});
+
+	// RPC mode's sendMessageToContext relies on this asymmetry: a custom message
+	// with no delivery options is only *observable* (message_start/message_end)
+	// when the session is idle. Mid-run it is steered into the agent and emits
+	// nothing, which silently lost pi-schedule-prompt command-mode reminders
+	// bound for the Signal bridge. rpc-mode therefore awaits waitForIdle() first;
+	// if this asymmetry ever changes, that workaround should be revisited.
+	it("only emits an optionless custom message once the session is idle", async () => {
+		const waiting = await createWaitingHarness();
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+
+		const emitted: string[] = [];
+		harness.session.subscribe((event) => {
+			if (
+				(event.type === "message_start" || event.type === "message_end") &&
+				event.message?.role === "custom" &&
+				event.message.customType === "notify-test"
+			) {
+				emitted.push(event.type);
+			}
+		});
+
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+
+		await waitForToolStart;
+		// Mid-run the message is steered into the agent, so nothing is emitted at
+		// call time — the caller cannot tell whether it was delivered.
+		await harness.session.sendCustomMessage({
+			customType: "notify-test",
+			content: [{ type: "text", text: "reminder" }],
+			display: true,
+			details: {},
+		});
+		expect(emitted).toEqual([]);
+
+		releaseToolExecution();
+		await promptPromise;
+		await harness.session.waitForIdle();
+		// It surfaces only once the turn carries it — and not at all if the run
+		// has already finished, which is the race that lost scheduled reminders.
+		expect(emitted).toEqual(["message_start", "message_end"]);
+
+		// Sent while idle, the pair the RPC client needs goes out immediately.
+		emitted.length = 0;
+		await harness.session.sendCustomMessage({
+			customType: "notify-test",
+			content: [{ type: "text", text: "reminder" }],
+			display: true,
+			details: {},
+		});
+		expect(emitted).toEqual(["message_start", "message_end"]);
+	});
 });
