@@ -396,6 +396,14 @@ export interface ExtensionCommandContext extends ExtensionContext {
  * This is passed to `withSession()` callbacks on `newSession()`, `fork()`, and `switchSession()`.
  */
 export interface ReplacedSessionContext extends ExtensionCommandContext {
+	/**
+	 * Set a display name on the replacement session.
+	 *
+	 * `ctx.sessionManager` is read-only, so this is the only supported way for an extension
+	 * to name the session it just switched into (e.g. so it is identifiable in `pi --resume`).
+	 */
+	setSessionName(name: string): void;
+
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },

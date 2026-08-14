@@ -101,6 +101,11 @@ describe("regression #2860: replaced session callbacks", () => {
 			sessionManager: SessionManager.create(tempDir),
 		});
 
+		// Extension errors are reported on the runner of whichever session is current, so the
+		// sink has to be re-attached on every rebind — the same way interactive mode does it
+		// in bindCurrentSessionExtensions().
+		const extensionErrors: string[] = [];
+
 		const rebindSession = async (): Promise<void> => {
 			const session = runtime.session;
 			await session.bindExtensions({
@@ -126,6 +131,9 @@ describe("regression #2860: replaced session callbacks", () => {
 					},
 				},
 			});
+			session.extensionRunner.onError((error) => {
+				extensionErrors.push(error.error);
+			});
 		};
 
 		runtime.setRebindSession(async () => {
@@ -141,7 +149,7 @@ describe("regression #2860: replaced session callbacks", () => {
 			}
 		});
 
-		return { runtime, faux };
+		return { runtime, faux, extensionErrors };
 	}
 
 	it("rebinds before withSession, targets the replacement session, and invalidates stale pi/ctx", async () => {
@@ -275,5 +283,69 @@ describe("regression #2860: replaced session callbacks", () => {
 			"user:switch callback message",
 			"assistant:switch reply",
 		]);
+	});
+
+	it("names the replacement session via setSessionName", async () => {
+		let targetSessionPath = "";
+		const { runtime } = await createRuntimeForTest(
+			(pi) => {
+				pi.registerCommand("switch-it", {
+					description: "switch-it",
+					handler: async (_args, ctx) => {
+						await ctx.switchSession(targetSessionPath, {
+							withSession: async (replacedCtx) => {
+								replacedCtx.setSessionName("named by withSession");
+							},
+						});
+					},
+				});
+			},
+			["root reply", "target reply"],
+		);
+
+		await runtime.session.prompt("root");
+		const originalSessionPath = runtime.session.sessionFile;
+		await runtime.newSession();
+		await runtime.session.prompt("target");
+		targetSessionPath = runtime.session.sessionFile!;
+		await runtime.switchSession(originalSessionPath!);
+		expect(runtime.session.sessionManager.getSessionName()).toBeUndefined();
+
+		await runtime.session.prompt("/switch-it");
+
+		// The name must land on the session that was switched *into*, not the one left behind.
+		expect(runtime.session.sessionFile).toBe(targetSessionPath);
+		expect(runtime.session.sessionManager.getSessionName()).toBe("named by withSession");
+		expect(SessionManager.open(originalSessionPath!).getSessionName()).toBeUndefined();
+	});
+
+	it("reports a throwing withSession as an extension error instead of failing the switch", async () => {
+		const { runtime, extensionErrors } = await createRuntimeForTest(() => {}, ["root reply", "target reply"]);
+
+		await runtime.session.prompt("root");
+		const originalSessionPath = runtime.session.sessionFile;
+		await runtime.newSession();
+		await runtime.session.prompt("target");
+		const targetSessionPath = runtime.session.sessionFile!;
+		await runtime.switchSession(originalSessionPath!);
+		extensionErrors.length = 0;
+
+		// Asserted against runtime.switchSession directly, not via a command handler: the
+		// command dispatcher has its own catch that would swallow the throw either way, so
+		// routing through it cannot distinguish the fix. This is the exact boundary interactive
+		// mode wraps in handleFatalRuntimeError -> process.exit(1), so a rejection here is a
+		// silent death of the whole process in production.
+		await expect(
+			runtime.switchSession(targetSessionPath, {
+				withSession: async () => {
+					throw new TypeError("ctx.doesNotExist is not a function");
+				},
+			}),
+		).resolves.toEqual({ cancelled: false });
+
+		// The replacement session is already installed when withSession runs — the switch
+		// itself succeeded, and only the callback failed.
+		expect(runtime.session.sessionFile).toBe(targetSessionPath);
+		expect(extensionErrors).toEqual(["ctx.doesNotExist is not a function"]);
 	});
 });

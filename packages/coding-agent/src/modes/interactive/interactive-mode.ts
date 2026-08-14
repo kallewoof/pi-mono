@@ -2047,6 +2047,14 @@ export class InteractiveMode {
 		this.showError(`${prefix}: ${message}`);
 		stopThemeWatcher();
 		this.stop("transcript");
+		// showError only queues a render (requestRender defers via process.nextTick), and
+		// stop() + process.exit() below run in this same tick — so the queued render never
+		// happens and the user sees pi vanish with no explanation. Print after the TUI has
+		// released the terminal so the failure survives the exit.
+		console.error(`${prefix}: ${message}`);
+		if (error instanceof Error && error.stack) {
+			console.error(error.stack);
+		}
 		process.exit(1);
 	}
 

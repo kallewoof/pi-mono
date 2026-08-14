@@ -186,10 +186,23 @@ export class AgentSessionRuntime {
 
 	private async finishSessionReplacement(withSession?: (ctx: ReplacedSessionContext) => Promise<void>): Promise<void> {
 		if (this.rebindSession) {
+			// A failed rebind really is fatal: the host is left without a bound session.
 			await this.rebindSession(this.session);
 		}
 		if (withSession) {
-			await withSession(this.session.createReplacedSessionContext());
+			// The replacement session is already applied by this point, so the switch itself
+			// succeeded. A throw from an extension's post-switch callback is an extension bug,
+			// not a reason to tear the process down — report it like any other extension error.
+			try {
+				await withSession(this.session.createReplacedSessionContext());
+			} catch (err) {
+				this.session.extensionRunner.emitError({
+					extensionPath: "<withSession>",
+					event: "session_replacement",
+					error: err instanceof Error ? err.message : String(err),
+					stack: err instanceof Error ? err.stack : undefined,
+				});
+			}
 		}
 	}
 
