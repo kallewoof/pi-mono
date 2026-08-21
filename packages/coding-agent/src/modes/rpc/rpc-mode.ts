@@ -20,8 +20,10 @@ import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
+	SessionShutdownEvent,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import { emitSessionShutdownEvent } from "../../core/extensions/runner.ts";
 import {
 	flushRawStdout,
 	takeOverStdout,
@@ -471,7 +473,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			writeFileSync(contextsFilePath, JSON.stringify(Object.fromEntries(contextFiles), null, 2));
 		}
 
-		const unsub = ctxSession.subscribe((event) => output({ ...event, context: contextName }));
+		// Same wire shape as the default session: toJsonEvent strips the cumulative
+		// assistant snapshot from message_update, leaving the delta plus the context tag.
+		const unsub = ctxSession.subscribe((event) => output({ ...toJsonEvent(event), context: contextName }));
 		contextUnsubscribers.set(contextName, unsub);
 		contextSessions.set(contextName, ctxSession);
 
@@ -485,6 +489,25 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		return ctxSession;
 	};
 	contextRouter = getOrCreateContextSession;
+
+	/**
+	 * Retire a context session the way every other host does: emit
+	 * `session_shutdown` to its extensions *before* disposing it.
+	 *
+	 * `AgentSession.dispose()` only invalidates the extension runner — it does not
+	 * notify extensions. An extension that owns background state keyed to the
+	 * session (timers, subprocesses; pi-schedule-prompt's CronScheduler is the
+	 * motivating case) therefore never got its teardown hook here, and kept
+	 * running against a ctx that throws "stale ctx" on every call: its cron timers
+	 * stayed armed, fired on schedule, and silently dropped every delivery.
+	 */
+	const disposeContextSession = async (
+		ctxSession: AgentSession,
+		reason: SessionShutdownEvent["reason"],
+	): Promise<void> => {
+		await emitSessionShutdownEvent(ctxSession.extensionRunner, { type: "session_shutdown", reason });
+		ctxSession.dispose();
+	};
 
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse | undefined> => {
@@ -551,20 +574,20 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					if (old) {
 						contextUnsubscribers.get(contextName)?.();
 						contextUnsubscribers.delete(contextName);
-						old.dispose();
+						await disposeContextSession(old, "new");
 						contextSessions.delete(contextName);
-						contextFiles.delete(contextName);
 					}
-					const fresh = await runtimeHost.createIsolatedSession();
-					fresh.setSessionName(contextName);
-					const sessionFile = fresh.sessionFile;
-					if (sessionFile) {
-						contextFiles.set(contextName, sessionFile);
-						writeFileSync(contextsFilePath, JSON.stringify(Object.fromEntries(contextFiles), null, 2));
-					}
-					const unsub = fresh.subscribe((event) => output({ ...event, context: contextName }));
-					contextUnsubscribers.set(contextName, unsub);
-					contextSessions.set(contextName, fresh);
+					// Drop the persisted mapping as well: "new session" must start
+					// empty, and getOrCreateContextSession resumes from contextFiles
+					// whenever the file is still there.
+					contextFiles.delete(contextName);
+					// Build the replacement through getOrCreateContextSession rather
+					// than inline, so it gets the *same* wiring as any other context
+					// session — above all bindExtensions(), which emits session_start
+					// and installs the UI / cross-context routing handlers. Recreating
+					// it by hand here left every extension uninitialised in the new
+					// session (no session_start, no tools state, no scheduler).
+					await getOrCreateContextSession(contextName);
 					return success(id, "new_session", { cancelled: false });
 				}
 				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
@@ -878,7 +901,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			unsub();
 		}
 		for (const ctxSession of contextSessions.values()) {
-			ctxSession.dispose();
+			await disposeContextSession(ctxSession, "quit");
 		}
 		await runtimeHost.dispose();
 		detachInput();

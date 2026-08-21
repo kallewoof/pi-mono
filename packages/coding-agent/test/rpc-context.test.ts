@@ -17,7 +17,7 @@ import {
 	type Model,
 } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentSession } from "../src/core/agent-session.ts";
+import { AgentSession, type ExtensionBindings } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -143,6 +143,10 @@ interface RuntimeHostOptions {
 interface RuntimeHostResult {
 	runtimeHost: AgentSessionRuntime;
 	cleanup: () => Promise<void>;
+	/** Isolated (context) sessions handed out by the host, in creation order. */
+	createdSessions: AgentSession[];
+	/** Isolated sessions that rpc-mode called bindExtensions() on, in call order. */
+	boundSessions: AgentSession[];
 }
 
 async function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostOptions): Promise<RuntimeHostResult> {
@@ -192,6 +196,21 @@ async function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostO
 	});
 
 	const createdSessions: AgentSession[] = [];
+	const boundSessions: AgentSession[] = [];
+
+	// Record bindExtensions() so tests can assert that *every* isolated session
+	// rpc-mode hands out gets its extensions wired (session_start, UI and
+	// cross-context routing handlers) — not just the ones created lazily on first
+	// use. A replacement session that skips it looks fine until an extension
+	// needs its per-session state.
+	const trackBinding = (s: AgentSession): AgentSession => {
+		const bind = s.bindExtensions.bind(s);
+		s.bindExtensions = async (bindings: ExtensionBindings) => {
+			boundSessions.push(s);
+			await bind(bindings);
+		};
+		return s;
+	};
 
 	const runtimeHost = {
 		session: mainSession,
@@ -211,7 +230,7 @@ async function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostO
 				resourceLoader: createTestResourceLoader(),
 			});
 			createdSessions.push(s);
-			return s;
+			return trackBinding(s);
 		}),
 		loadIsolatedSession: vi.fn(async (sessionPath: string) => {
 			const sm = SessionManager.open(sessionPath);
@@ -224,12 +243,14 @@ async function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostO
 				resourceLoader: createTestResourceLoader(),
 			});
 			createdSessions.push(s);
-			return s;
+			return trackBinding(s);
 		}),
 	} as unknown as AgentSessionRuntime;
 
 	return {
 		runtimeHost,
+		createdSessions,
+		boundSessions,
 		cleanup: async () => {
 			for (const s of createdSessions) {
 				try {
@@ -249,27 +270,31 @@ async function createRuntimeHostInDir(sessionsDir: string, options: RuntimeHostO
 	};
 }
 
-async function startRpcModeInDir(
-	sessionsDir: string,
-	options: RuntimeHostOptions,
-): Promise<{ lineHandler: (line: string) => void; cleanup: () => Promise<void> }> {
+interface StartedRpcMode {
+	lineHandler: (line: string) => void;
+	cleanup: () => Promise<void>;
+	createdSessions: AgentSession[];
+	boundSessions: AgentSession[];
+}
+
+async function startRpcModeInDir(sessionsDir: string, options: RuntimeHostOptions): Promise<StartedRpcMode> {
 	rpcIo.outputLines = [];
 	rpcIo.lineHandler = undefined;
 
-	const { runtimeHost, cleanup } = await createRuntimeHostInDir(sessionsDir, options);
+	const { runtimeHost, cleanup, createdSessions, boundSessions } = await createRuntimeHostInDir(sessionsDir, options);
 	void runRpcMode(runtimeHost);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
-	return { lineHandler: rpcIo.lineHandler!, cleanup };
+	return { lineHandler: rpcIo.lineHandler!, cleanup, createdSessions, boundSessions };
 }
 
-async function startRpcMode(
-	options: RuntimeHostOptions,
-): Promise<{ lineHandler: (line: string) => void; cleanup: () => Promise<void>; sessionsDir: string }> {
+async function startRpcMode(options: RuntimeHostOptions): Promise<StartedRpcMode & { sessionsDir: string }> {
 	const sessionsDir = join(tmpdir(), `pi-ctx-sessions-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-	const { lineHandler, cleanup } = await startRpcModeInDir(sessionsDir, options);
+	const { lineHandler, cleanup, createdSessions, boundSessions } = await startRpcModeInDir(sessionsDir, options);
 	return {
 		lineHandler,
+		createdSessions,
+		boundSessions,
 		cleanup: async () => {
 			await cleanup();
 			if (existsSync(sessionsDir)) rmSync(sessionsDir, { recursive: true });
@@ -606,6 +631,63 @@ describe("RPC multi-context", () => {
 			expect(newA).not.toBe(origA); // "Replaced" context has a new session
 			expect(newB).toBe(origB); // "Preserved" context is unchanged
 		} finally {
+			await cleanup();
+		}
+	});
+
+	it("new_session with context binds extensions on the replacement session", async () => {
+		// Regression: the replacement was built inline and never had bindExtensions()
+		// called on it, so no session_start fired and extensions kept per-session
+		// state (pi-schedule-prompt's CronScheduler, mcp-adapter's client) that the
+		// new session knew nothing about.
+		const { lineHandler, cleanup, createdSessions, boundSessions } = await startRpcMode({
+			withAuth: true,
+			responseDelayMs: 0,
+		});
+		try {
+			lineHandler(JSON.stringify({ id: "ns-bind-1", type: "get_state", context: "BindCtx" }));
+			await vi.waitFor(waitForResponse("ns-bind-1"));
+			expect(createdSessions).toHaveLength(1);
+			expect(boundSessions).toEqual([createdSessions[0]]);
+
+			lineHandler(JSON.stringify({ id: "ns-bind-2", type: "new_session", context: "BindCtx" }));
+			await vi.waitFor(waitForResponse("ns-bind-2"));
+
+			expect(createdSessions).toHaveLength(2);
+			expect(createdSessions[1]).not.toBe(createdSessions[0]);
+			expect(boundSessions).toEqual([createdSessions[0], createdSessions[1]]);
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("new_session with context emits session_shutdown before disposing the old session", async () => {
+		// dispose() only invalidates the extension runner; without an explicit
+		// session_shutdown, extensions owning background state (timers, subprocesses)
+		// never tear it down and keep running against a stale ctx.
+		const { lineHandler, cleanup, createdSessions } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		try {
+			lineHandler(JSON.stringify({ id: "ns-sd-1", type: "get_state", context: "ShutdownCtx" }));
+			await vi.waitFor(waitForResponse("ns-sd-1"));
+			const old = createdSessions[0];
+
+			const order: string[] = [];
+			vi.spyOn(old.extensionRunner, "hasHandlers").mockImplementation((type) => type === "session_shutdown");
+			const emitSpy = vi.spyOn(old.extensionRunner, "emit").mockImplementation(async (event) => {
+				order.push(`emit:${event.type}`);
+				return undefined as never;
+			});
+			vi.spyOn(old, "dispose").mockImplementation(() => {
+				order.push("dispose");
+			});
+
+			lineHandler(JSON.stringify({ id: "ns-sd-2", type: "new_session", context: "ShutdownCtx" }));
+			await vi.waitFor(waitForResponse("ns-sd-2"));
+
+			expect(emitSpy).toHaveBeenCalledWith(expect.objectContaining({ type: "session_shutdown", reason: "new" }));
+			expect(order).toEqual(["emit:session_shutdown", "dispose"]);
+		} finally {
+			vi.restoreAllMocks();
 			await cleanup();
 		}
 	});
