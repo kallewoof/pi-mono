@@ -14,6 +14,7 @@ import type {
 	ThinkingLevel,
 	Tool,
 } from "../types.ts";
+import { modelAcceptsImageInput } from "../utils/image-support.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getJsonSchemaToolParameters, resolveJsonSchemaStrictSampling } from "./constrained-sampling.ts";
@@ -223,7 +224,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			// Extract text and image content
 			const textContent = msg.content.filter((c): c is TextContent => c.type === "text");
 			const textResult = textContent.map((c) => c.text).join("\n");
-			const imageContent = model.input.includes("image")
+			const imageContent = modelAcceptsImageInput(model)
 				? msg.content.filter((c): c is ImageContent => c.type === "image")
 				: [];
 

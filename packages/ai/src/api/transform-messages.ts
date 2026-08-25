@@ -8,6 +8,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { modelAcceptsImageInput } from "../utils/image-support.ts";
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
@@ -33,7 +34,7 @@ function replaceImagesWithPlaceholder(content: (TextContent | ImageContent)[], p
 }
 
 function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model: Model<TApi>): Message[] {
-	if (model.input.includes("image")) {
+	if (modelAcceptsImageInput(model)) {
 		return messages;
 	}
 

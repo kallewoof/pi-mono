@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed the `read` tool's non-vision note to also appear after an endpoint has rejected image input at runtime, not just when the model catalog says the model is text-only.
 - Fixed the agent to recover automatically when a turn is truncated by the output-token limit because the input context is full. Such a `length` stop is now treated as a context overflow: the tool loop stops instead of spinning on truncated (often empty-argument) tool calls, and auto-compaction runs and retries against the compacted context rather than leaving the session stuck for a manual nudge.
 
 ## [0.84.4] - 2026-08-28

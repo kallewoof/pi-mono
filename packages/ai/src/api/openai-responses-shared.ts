@@ -30,6 +30,7 @@ import type {
 } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
+import { modelAcceptsImageInput } from "../utils/image-support.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import {
@@ -85,7 +86,7 @@ function convertToolResultOutput<TApi extends Api>(
 	const images = content.filter((c): c is ImageContent => c.type === "image");
 	const hasText = textResult.length > 0;
 
-	if (images.length === 0 || !model.input.includes("image")) {
+	if (images.length === 0 || !modelAcceptsImageInput(model)) {
 		return sanitizeSurrogates(hasText ? textResult : images.length > 0 ? "(see attached image)" : "(no tool output)");
 	}
 

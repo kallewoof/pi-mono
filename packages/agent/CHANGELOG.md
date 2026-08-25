@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the agent loop bricking a session when the endpoint rejects image input (for example a llama.cpp server started without an mmproj, which answers `500 image input is not supported`). The failed attempt is no longer committed to the transcript; the model is downgraded to text-only and the turn is retried once, so the model sees an image-omitted placeholder in the tool result and the session continues.
+
 ## [0.84.4] - 2026-08-28
 
 ### Breaking Changes

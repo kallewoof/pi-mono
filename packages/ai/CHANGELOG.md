@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a session getting permanently stuck after an endpoint rejected an image: `stream()` callers can now mark a model with `markImageInputUnsupported()`, and `transformMessages` (plus the per-provider tool-result image paths) consults `modelAcceptsImageInput()` so the image is replaced with the non-vision placeholder for the rest of the process instead of being resent on every request. Added `isImageInputUnsupportedError()` and `hasImageContent()` for detecting the failure.
+
 ## [0.84.4] - 2026-08-28
 
 ### Added

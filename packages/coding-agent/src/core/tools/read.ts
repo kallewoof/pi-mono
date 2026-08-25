@@ -1,6 +1,12 @@
 import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { Api, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	type ImageContent,
+	type Model,
+	modelAcceptsImageInput,
+	type TextContent,
+} from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile } from "fs/promises";
@@ -91,7 +97,7 @@ function trimTrailingEmptyLines(lines: string[]): string[] {
 }
 
 function getNonVisionImageNote(model: Model<Api> | undefined): string | undefined {
-	if (!model || model.input.includes("image")) {
+	if (!model || modelAcceptsImageInput(model)) {
 		return undefined;
 	}
 	return "[Current model does not support images. The image will be omitted from this request.]";

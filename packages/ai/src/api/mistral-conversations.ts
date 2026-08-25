@@ -16,6 +16,7 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
+import { modelAcceptsImageInput } from "../utils/image-support.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
@@ -509,7 +510,7 @@ function buildChatPayload(
 	const payload: MistralChatPayload = {
 		model: model.id,
 		stream: true,
-		messages: toChatMessages(messages, model.input.includes("image")),
+		messages: toChatMessages(messages, modelAcceptsImageInput(model)),
 	};
 
 	if (context.tools?.length) payload.tools = toFunctionTools(context.tools);

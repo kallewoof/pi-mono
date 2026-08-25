@@ -40,6 +40,7 @@ import { formatProviderError, normalizeProviderError } from "../utils/error-body
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
+import { modelAcceptsImageInput } from "../utils/image-support.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
@@ -1399,7 +1400,7 @@ export function convertMessages(
 					}
 				}
 
-				if (hasImages && model.input.includes("image")) {
+				if (hasImages && modelAcceptsImageInput(model)) {
 					for (const block of toolMsg.content) {
 						if (isImageContentBlock(block)) {
 							imageBlocks.push({
