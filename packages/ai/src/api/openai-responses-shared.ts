@@ -33,6 +33,7 @@ import type {
 } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
+import { modelAcceptsImageInput } from "../utils/image-support.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
@@ -91,7 +92,7 @@ function convertToolResultOutput<TApi extends Api>(
 	const images = content.filter((c): c is ImageContent => c.type === "image");
 	const hasText = textResult.trim().length > 0;
 
-	if (images.length === 0 || !model.input.includes("image")) {
+	if (images.length === 0 || !modelAcceptsImageInput(model)) {
 		return sanitizeSurrogates(hasText ? textResult : images.length > 0 ? "(see attached image)" : "(no tool output)");
 	}
 

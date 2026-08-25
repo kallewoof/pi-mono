@@ -9,12 +9,16 @@ import {
 	EventStream,
 	getCurrentTools,
 	getToolStateChanges,
+	hasImageContent,
+	isImageInputUnsupportedError,
+	markImageInputUnsupported,
 	mergeClientIdentity,
 	normalizeContext,
 	PI_ATTRIBUTION,
 	type SystemMessage,
 	type ToolResultMessage,
 	type ToolStateChanges,
+	type TranscriptContext,
 	toToolDeclaration,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
@@ -384,6 +388,16 @@ function withToolChanges(message: SystemMessage, { toolsAdded, toolsRemoved }: T
 }
 
 /**
+ * One assistant response attempt. `started` is true once the provider emitted a
+ * partial, which means `message_start` was already emitted and the partial is
+ * sitting at the end of `context.messages`.
+ */
+interface StreamAttempt {
+	message: AssistantMessage;
+	started: boolean;
+}
+
+/**
  * Stream an assistant response from the LLM.
  * This is where AgentMessage[] gets transformed to Message[] for the LLM.
  */
@@ -405,6 +419,46 @@ async function streamAssistantResponse(
 
 	const llmContext = normalizeContext({ messages: llmMessages });
 
+	let attempt = await runStreamAttempt(context, config, llmContext, signal, emit, streamFunction);
+
+	// A model can advertise image input while the endpoint behind it rejects it
+	// (a llama.cpp server started without an mmproj is the common case). The
+	// image stays in the transcript, so without this every later request fails
+	// the same way and the session is stuck. Downgrade the model once and retry:
+	// the image is then replaced with a placeholder the model reads as a failed
+	// tool result, and the session keeps going.
+	if (
+		!attempt.started &&
+		attempt.message.stopReason === "error" &&
+		isImageInputUnsupportedError(attempt.message.errorMessage) &&
+		hasImageContent(llmMessages) &&
+		markImageInputUnsupported(config.model)
+	) {
+		attempt = await runStreamAttempt(context, config, llmContext, signal, emit, streamFunction);
+	}
+
+	if (attempt.started) {
+		context.messages[context.messages.length - 1] = attempt.message;
+	} else {
+		context.messages.push(attempt.message);
+		await emit({ type: "message_start", message: { ...attempt.message } });
+	}
+	await emit({ type: "message_end", message: attempt.message });
+	return attempt.message;
+}
+
+/**
+ * Run a single assistant response attempt. The final message is returned rather
+ * than committed to the context so the caller can decide whether to retry.
+ */
+async function runStreamAttempt(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	llmContext: TranscriptContext,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFunction: StreamFn,
+): Promise<StreamAttempt> {
 	// Resolve API key (important for expiring tokens)
 	const resolvedApiKey =
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
@@ -451,31 +505,12 @@ async function streamAssistantResponse(
 				break;
 
 			case "done":
-			case "error": {
-				const finalMessage = await result();
-				if (addedPartial) {
-					context.messages[context.messages.length - 1] = finalMessage;
-				} else {
-					context.messages.push(finalMessage);
-				}
-				if (!addedPartial) {
-					await emit({ type: "message_start", message: { ...finalMessage } });
-				}
-				await emit({ type: "message_end", message: finalMessage });
-				return finalMessage;
-			}
+			case "error":
+				return { message: await result(), started: addedPartial };
 		}
 	}
 
-	const finalMessage = await result();
-	if (addedPartial) {
-		context.messages[context.messages.length - 1] = finalMessage;
-	} else {
-		context.messages.push(finalMessage);
-		await emit({ type: "message_start", message: { ...finalMessage } });
-	}
-	await emit({ type: "message_end", message: finalMessage });
-	return finalMessage;
+	return { message: await result(), started: addedPartial };
 }
 
 /**

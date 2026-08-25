@@ -40,6 +40,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
+import { modelAcceptsImageInput } from "../utils/image-support.ts";
 import {
 	applyOpenRouterReportedCost,
 	isOpenRouterModel,
@@ -1426,7 +1427,7 @@ export function convertMessages(
 				}
 				params.push(toolResultMsg);
 
-				if (hasImages && model.input.includes("image")) {
+				if (hasImages && modelAcceptsImageInput(model)) {
 					for (const block of toolMsg.content) {
 						if (isImageContentBlock(block)) {
 							imageBlocks.push({

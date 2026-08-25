@@ -1,4 +1,9 @@
-import type { ImageContent, ModelImageResizeOptions, TextContent } from "@earendil-works/pi-ai";
+import {
+	type ImageContent,
+	type ModelImageResizeOptions,
+	modelAcceptsImageInput,
+	type TextContent,
+} from "@earendil-works/pi-ai";
 import { constants } from "fs";
 import { access as fsAccess, open as fsOpen, readFile as fsReadFile } from "fs/promises";
 import { type Static, Type } from "typebox";
@@ -289,7 +294,7 @@ export function createReadToolDefinition(
 										{ type: "text", text: textNote },
 										{ type: "image", data: processed.data, mimeType: processed.mimeType },
 									];
-									if (ctx?.model && !ctx.model.input.includes("image")) {
+									if (ctx?.model && !modelAcceptsImageInput(ctx.model)) {
 										details = { imageUnsupportedByModel: ctx.model.id };
 									}
 								}

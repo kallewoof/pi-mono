@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed tool calls skipped by an abort mid-batch getting no tool result in the transcript; each now gets an "Operation aborted" error result. With an aborted signal, `runToolCall` and the loop now return that result before looking up the tool or calling `beforeToolCall` ([#9986](https://github.com/earendil-works/pi/issues/9986))
+- Fixed the agent loop bricking a session when the endpoint rejects image input (for example a llama.cpp server started without an mmproj, which answers `500 image input is not supported`). The failed attempt is no longer committed to the transcript; the model is downgraded to text-only and the turn is retried once, so the model sees an image-omitted placeholder in the tool result and the session continues.
 
 ## [1.5.2] - 2026-11-10
 
