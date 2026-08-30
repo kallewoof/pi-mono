@@ -190,6 +190,46 @@ export type PrepareRequest = (
 
 export interface PrepareNextTurnContext extends AgentTurnContext {}
 
+/**
+ * Text the model continues instead of starting its response fresh.
+ *
+ * `thinking` primes the reasoning rather than the visible answer, which is the more effective
+ * lever on models that always reason: the primed sentence becomes the opening of the model's own
+ * chain of thought. It only reaches endpoints that accept replayable reasoning
+ * (`modelAcceptsThinkingPrefill` in pi-ai — OpenAI-compatible completions such as llama.cpp);
+ * elsewhere it is dropped rather than sent as something the API would reject.
+ */
+export interface AgentPrefill {
+	/** Text the visible response starts with. */
+	text?: string;
+	/** Text the reasoning starts with. */
+	thinking?: string;
+	/**
+	 * Request field carrying the thinking prefill on OpenAI-compatible endpoints.
+	 * Defaults to `reasoning_content`; some endpoints read `reasoning` or `reasoning_text`.
+	 */
+	thinkingField?: string;
+}
+
+/**
+ * A queued steering or follow-up message, plus the prefill that primes the response it triggers.
+ *
+ * Queues accept a bare `AgentMessage` too; the object form exists so priming can travel *with* the
+ * message rather than with the run. A prefill armed on the run (`AgentLoopConfig.prefill`) applies
+ * to the run's first request and nothing else, which is wrong for a message that has to wait: by
+ * the time a queued message is injected, that request is long gone. The prefill here is applied to
+ * the request that follows this message's injection instead, so the same message gets the same
+ * priming whether it started a turn immediately or waited for one to finish.
+ */
+export interface PendingAgentMessage {
+	message: AgentMessage;
+	/** Primes the response this message triggers. See `AgentLoopConfig.prefill` for the channels. */
+	prefill?: string | AgentPrefill;
+}
+
+/** A queued message, with or without its own priming. */
+export type QueuedAgentMessage = AgentMessage | PendingAgentMessage;
+
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
 
@@ -289,8 +329,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Use this for "steering" the agent while it's working.
 	 *
 	 * Contract: must not throw or reject. Return [] when no steering messages are available.
+	 *
+	 * An entry returned in `PendingAgentMessage` form primes the request that follows its injection.
 	 */
-	getSteeringMessages?: () => Promise<AgentMessage[]>;
+	getSteeringMessages?: () => Promise<QueuedAgentMessage[]>;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
@@ -302,8 +344,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Use this for follow-up messages that should wait until the agent finishes.
 	 *
 	 * Contract: must not throw or reject. Return [] when no follow-up messages are available.
+	 *
+	 * An entry returned in `PendingAgentMessage` form primes the request that follows its injection.
 	 */
-	getFollowUpMessages?: () => Promise<AgentMessage[]>;
+	getFollowUpMessages?: () => Promise<QueuedAgentMessage[]>;
 
 	/**
 	 * Tool execution mode.
@@ -315,6 +359,23 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Default: "parallel"
 	 */
 	toolExecution?: ToolExecutionMode;
+
+	/**
+	 * Primes the first assistant response of this loop run. A bare string primes the response text.
+	 *
+	 * The prefill is appended to the outgoing LLM messages as a trailing assistant message, so the
+	 * model continues it instead of starting fresh, and is merged back into the assistant message
+	 * the loop produces, so the transcript reads as one continuous response.
+	 *
+	 * Applies to the first provider request only; later turns in the same run (tool loops, steering)
+	 * are not primed — a queued message that should prime its own turn carries the prefill itself
+	 * (see `PendingAgentMessage`).
+	 *
+	 * Not every API accepts a trailing assistant message. Anthropic rejects one when extended
+	 * thinking is enabled, and OpenAI Responses ignores it. Callers are responsible for deciding
+	 * when priming is appropriate.
+	 */
+	prefill?: string | AgentPrefill;
 
 	/**
 	 * Called before a tool is executed, after arguments have been validated.

@@ -22,6 +22,7 @@ import {
 	type AgentContext,
 	type AgentEvent,
 	type AgentMessage,
+	type AgentPrefill,
 	type AgentState,
 	type AgentTool,
 	type AgentToolCallOutcome,
@@ -332,6 +333,21 @@ export interface ExtensionBindings {
 export type QueuedInputDisposition = "handled" | "queued";
 export type PromptDisposition = QueuedInputDisposition | "started";
 
+/**
+ * Trim a prefill's channels and drop it entirely when nothing is left to prime with.
+ *
+ * Trailing whitespace is stripped here as well as in the agent loop so `getPrefill()` reports
+ * exactly what will be sent.
+ */
+function normalizePrefill(prefill: string | AgentPrefill | undefined): AgentPrefill | undefined {
+	if (!prefill) return undefined;
+	const requested = typeof prefill === "string" ? { text: prefill } : prefill;
+	const text = requested.text?.trimEnd() || undefined;
+	const thinking = requested.thinking?.trimEnd() || undefined;
+	if (!text && !thinking) return undefined;
+	return { text, thinking, thinkingField: requested.thinkingField };
+}
+
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
 	/** Whether to dispatch extension commands and expand skill commands and prompt templates (default: true) */
@@ -342,6 +358,14 @@ export interface PromptOptions {
 	streamingBehavior?: "steer" | "followUp";
 	/** Source of input for extension input event handlers. Defaults to "interactive". */
 	source?: InputSource;
+	/**
+	 * Primes the assistant response. Sent as a trailing assistant message that the model continues,
+	 * and merged into the response so the transcript reads as one message. A bare string primes the
+	 * response text; `{ thinking }` primes the reasoning instead.
+	 * Takes precedence over a prefill armed with setPrefill(). A message that has to be queued
+	 * (steered or followed up) keeps its prefill and is primed when it is delivered.
+	 */
+	prefill?: string | AgentPrefill;
 	/** Internal hook used by RPC mode to observe how an accepted prompt was dispatched. Not called if the prompt is rejected. */
 	preflightResult?: (disposition: PromptDisposition) => void;
 }
@@ -439,6 +463,8 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
 	private _pendingCustomMessages: CustomMessage[] = [];
+	/** Prefill for the next prompt, set via setPrefill(). Consumed by the next prompt() call. */
+	private _pendingPrefill: AgentPrefill | undefined;
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -1991,7 +2017,11 @@ export class AgentSession {
 	 * starting another, and an abort requested meanwhile aborts the run as soon as it exists.
 	 * @param onStarted Called once the run's messages are prepared, before the first request.
 	 */
-	private async _startRun(trigger: BeforeAgentStartTrigger, onStarted?: () => void): Promise<void> {
+	private async _startRun(
+		trigger: BeforeAgentStartTrigger,
+		onStarted?: () => void,
+		prefill?: AgentPrefill,
+	): Promise<void> {
 		this._isAgentRunActive = true;
 		this._agentRunAbortRequested = false;
 		let messages: AgentMessage[];
@@ -2017,6 +2047,8 @@ export class AgentSession {
 		// are dropped, so a tool that never registers does not stay pending.
 		this._pendingToolNames.clear();
 		try {
+			// Set only once the run is certain to start, so a failed preparation cannot leak it.
+			this.agent.prefill = prefill;
 			await this.agent.prompt(messages);
 			while (!this._agentRunAbortRequested) {
 				if (await this._handlePostAgentRun()) {
@@ -2258,7 +2290,12 @@ export class AgentSession {
 		} finally {
 			this._promptPreflightCount--;
 		}
-		if (trigger) await this._startRun(trigger, () => preflightResult?.("started"));
+		if (!trigger) return;
+		// One-shot: an armed prefill primes this response only. The agent clears its own copy when
+		// the run ends, so a tool loop or an auto-retry continuation is not primed again.
+		const prefill = normalizePrefill(options?.prefill) ?? this._pendingPrefill;
+		this._pendingPrefill = undefined;
+		await this._startRun(trigger, () => preflightResult?.("started"), prefill);
 	}
 
 	/**
@@ -2296,10 +2333,16 @@ export class AgentSession {
 					"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 				);
 			}
+			// The prefill travels with the queued message and primes the request that follows
+			// its injection, so a message that had to wait is primed exactly as it would have
+			// been had it started a turn immediately. An armed prefill is consumed here too,
+			// so it cannot leak into a later prompt.
+			const queuedPrefill = normalizePrefill(options.prefill) ?? this._pendingPrefill;
+			this._pendingPrefill = undefined;
 			if (options.streamingBehavior === "followUp") {
-				await this._queueFollowUp(expandedText, currentImages);
+				await this._queueFollowUp(expandedText, currentImages, queuedPrefill);
 			} else {
-				await this._queueSteer(expandedText, currentImages);
+				await this._queueSteer(expandedText, currentImages, queuedPrefill);
 			}
 			preflightResult?.("queued");
 			return undefined;
@@ -2326,6 +2369,26 @@ export class AgentSession {
 		}
 
 		return { messageType: "user", prompt: expandedText, images: currentImages };
+	}
+
+	/**
+	 * Arm a prefill for the next prompt.
+	 *
+	 * The prefill is sent as a trailing assistant message that the model continues, which is how
+	 * providers express one. A bare string primes the response text; `{ thinking }` primes the
+	 * reasoning instead, which only reaches endpoints that accept replayable reasoning
+	 * (`modelAcceptsThinkingPrefill`). Pass undefined (or empty text) to disarm.
+	 *
+	 * Not every endpoint accepts a prefill: Anthropic rejects a trailing assistant message while
+	 * extended thinking is enabled, and OpenAI Responses ignores it.
+	 */
+	setPrefill(prefill: string | AgentPrefill | undefined): void {
+		this._pendingPrefill = normalizePrefill(prefill);
+	}
+
+	/** Prefill armed for the next prompt, if any. */
+	getPrefill(): AgentPrefill | undefined {
+		return this._pendingPrefill;
 	}
 
 	/**
@@ -2393,6 +2456,7 @@ export class AgentSession {
 		images: ImageContent[] | undefined,
 		behavior: "steer" | "followUp",
 		source: InputSource,
+		prefill?: AgentPrefill,
 	): Promise<QueuedInputDisposition> {
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
@@ -2410,9 +2474,9 @@ export class AgentSession {
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
 		if (behavior === "steer") {
-			await this._queueSteer(expandedText, processedInput.images);
+			await this._queueSteer(expandedText, processedInput.images, prefill);
 		} else {
-			await this._queueFollowUp(expandedText, processedInput.images);
+			await this._queueFollowUp(expandedText, processedInput.images, prefill);
 		}
 		return "queued";
 	}
@@ -2423,15 +2487,22 @@ export class AgentSession {
 	 * before the next LLM call.
 	 * Expands skill commands and prompt templates. Errors on extension commands.
 	 * @param images Optional image attachments to include with the message
-	 * @param options Input source; defaults to interactive
+	 * @param options Input source (defaults to interactive), and a prefill that primes the response
+	 *   this message triggers once it is delivered
 	 * @throws Error if text is an extension command
 	 */
 	async steer(
 		text: string,
 		images?: ImageContent[],
-		options?: { source?: InputSource },
+		options?: { source?: InputSource; prefill?: string | AgentPrefill },
 	): Promise<QueuedInputDisposition> {
-		return this._queueUserInput(text, images, "steer", options?.source ?? "interactive");
+		return this._queueUserInput(
+			text,
+			images,
+			"steer",
+			options?.source ?? "interactive",
+			normalizePrefill(options?.prefill),
+		);
 	}
 
 	/**
@@ -2439,21 +2510,28 @@ export class AgentSession {
 	 * Delivered only when agent has no more tool calls or steering messages.
 	 * Expands skill commands and prompt templates. Errors on extension commands.
 	 * @param images Optional image attachments to include with the message
-	 * @param options Input source; defaults to interactive
+	 * @param options Input source (defaults to interactive), and a prefill that primes the response
+	 *   this message triggers once it is delivered
 	 * @throws Error if text is an extension command
 	 */
 	async followUp(
 		text: string,
 		images?: ImageContent[],
-		options?: { source?: InputSource },
+		options?: { source?: InputSource; prefill?: string | AgentPrefill },
 	): Promise<QueuedInputDisposition> {
-		return this._queueUserInput(text, images, "followUp", options?.source ?? "interactive");
+		return this._queueUserInput(
+			text,
+			images,
+			"followUp",
+			options?.source ?? "interactive",
+			normalizePrefill(options?.prefill),
+		);
 	}
 
 	/**
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
-	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+	private async _queueSteer(text: string, images?: ImageContent[], prefill?: AgentPrefill): Promise<void> {
 		this._steeringMessages.push(text);
 		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -2462,13 +2540,13 @@ export class AgentSession {
 		}
 		const message: AgentMessage = { role: "user", content, timestamp: Date.now() };
 		if (images?.length) this._queuedMessagesWithImages.add(message);
-		this.agent.steer(message);
+		this.agent.steer(message, prefill);
 	}
 
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
-	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
+	private async _queueFollowUp(text: string, images?: ImageContent[], prefill?: AgentPrefill): Promise<void> {
 		this._followUpMessages.push(text);
 		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -2477,7 +2555,7 @@ export class AgentSession {
 		}
 		const message: AgentMessage = { role: "user", content, timestamp: Date.now() };
 		if (images?.length) this._queuedMessagesWithImages.add(message);
-		this.agent.followUp(message);
+		this.agent.followUp(message, prefill);
 	}
 
 	/** Replace a queued user message's images in place with normalized ones, appending hints to its text. */
@@ -2594,10 +2672,13 @@ export class AgentSession {
 	 * @param content User message content (string or content array)
 	 * @param options.deliverAs Delivery mode when streaming: "steer" or "followUp"
 	 * @param options.expandPromptTemplates Whether to dispatch extension commands and expand skill commands and prompt templates. Default: false.
+	 * @param options.prefill Primes the response this message triggers, as a trailing assistant message the
+	 *   model continues. A bare string primes the response text; `{ thinking }` primes the reasoning
+	 *   instead. Applies whether the message starts a turn immediately or has to be queued.
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
+		options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean; prefill?: string | AgentPrefill },
 	): Promise<void> {
 		// Normalize content to text string + optional images
 		let text: string;
@@ -2623,6 +2704,7 @@ export class AgentSession {
 			expandPromptTemplates: options?.expandPromptTemplates ?? false,
 			streamingBehavior: options?.deliverAs,
 			images,
+			prefill: options?.prefill,
 			source: "extension",
 		});
 	}

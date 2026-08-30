@@ -6,6 +6,7 @@
 
 - Added custom `fetch` support to the `google-generative-ai` and `google-vertex` adapters; Vertex ADC token requests still use `google-auth-library`'s own HTTP client ([#12103](https://github.com/earendil-works/pi/pull/12103) by [@rometi](https://github.com/rometi))
 - Added `deepseek-v4.1-flash` and `deepseek-v4.1-flash-1017` to the Qwen Token Plan Individual providers, and per-plan key variables `QWEN_TOKEN_PLAN_TEAM_API_KEY`, `QWEN_TOKEN_PLAN_TEAM_CN_API_KEY`, `QWEN_TOKEN_PLAN_INDIVIDUAL_API_KEY`, and `QWEN_TOKEN_PLAN_INDIVIDUAL_CN_API_KEY`; the shared `QWEN_TOKEN_PLAN_API_KEY` and `QWEN_TOKEN_PLAN_CN_API_KEY` still work ([#11773](https://github.com/earendil-works/pi/issues/11773))
+- Added `modelAcceptsThinkingPrefill()` and `DEFAULT_THINKING_PREFILL_FIELD`, naming which APIs can carry a reasoning prefill (a trailing assistant message whose reasoning the model continues) and the request field that carries it.
 
 ### Changed
 
@@ -21,6 +22,7 @@
 - Fixed Mistral Large 4 tool calls stalling for minutes: Mistral models no longer receive strict (schema-constrained) tools unless `compat.supportsStrictMode` is set ([#12148](https://github.com/earendil-works/pi/issues/12148))
 - Fixed non-strict Anthropic tool schemas dropping the root `additionalProperties`, so the model was not told that extra arguments are forbidden ([#12067](https://github.com/earendil-works/pi/issues/12067))
 - Fixed the OpenAI Codex WebSocket 60-minute connection limit failing the turn when it hit mid-stream, for example during long thinking. The error is now retried on a fresh connection, and new requests stop reusing a cached connection after 45 minutes instead of 55, so a long response is less likely to reach the limit ([#12124](https://github.com/earendil-works/pi/issues/12124))
+- Fixed `openai-completions` dropping an assistant message that carries only reasoning. Such a message is how a reasoning prefill is expressed on endpoints that accept one (llama.cpp), and it was being filtered out before the request. Messages whose reasoning field is empty are still dropped.
 - Fixed a session getting permanently stuck after an endpoint rejected an image: `stream()` callers can now mark a model with `markImageInputUnsupported()`, and `transformMessages` (plus the per-provider tool-result image paths) consults `modelAcceptsImageInput()` so the image is replaced with the non-vision placeholder for the rest of the process instead of being resent on every request. Added `isImageInputUnsupportedError()` and `hasImageContent()` for detecting the failure.
 
 ### Removed

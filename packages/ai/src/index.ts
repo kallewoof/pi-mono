@@ -39,6 +39,7 @@ export * from "./utils/identity.ts";
 export * from "./utils/image-support.ts";
 export * from "./utils/json-parse.ts";
 export * from "./utils/overflow.ts";
+export * from "./utils/prefill-support.ts";
 export * from "./utils/retry.ts";
 export * from "./utils/streaming-json.ts";
 export * from "./utils/string-enum.ts";

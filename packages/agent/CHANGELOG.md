@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AgentLoopConfig.prefill` and `Agent.prefill`: text that primes the next assistant response. It is sent as a trailing assistant message the model continues, and merged back into the streamed and final assistant message so the transcript reads as one response. It applies to the first provider request of a run only and is cleared when the run ends. Endpoints that echo the prefill back (llama.cpp) and endpoints that return only the continuation (Anthropic) both end up with the primed text exactly once.
+- Added reasoning prefill via `AgentPrefill`: `{ thinking }` primes the model's chain of thought instead of its visible answer, carried as a thinking block whose signature names the request field (`reasoning_content` by default, `thinkingField` to override). Dropped for APIs that cannot carry replayable reasoning, per `modelAcceptsThinkingPrefill`.
+
 ### Fixed
 
 - Fixed tool calls skipped by an abort mid-batch getting no tool result in the transcript; each now gets an "Operation aborted" error result. With an aborted signal, `runToolCall` and the loop now return that result before looking up the tool or calling `beforeToolCall` ([#9986](https://github.com/earendil-works/pi/issues/9986))
