@@ -9,6 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
+import { modelAcceptsThinkingPrefill } from "@earendil-works/pi-ai";
 import type { AssistantMessage, ImageContent, Message, Model, Usage } from "@earendil-works/pi-ai/compat";
 import type {
 	AutocompleteItem,
@@ -3046,6 +3047,11 @@ export class InteractiveMode {
 			}
 			if (text === "/prompt full") {
 				this.handleFullPromptCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/prefill" || text.startsWith("/prefill ")) {
+				this.handlePrefillCommand(text);
 				this.editor.setText("");
 				return;
 			}
@@ -6247,6 +6253,66 @@ export class InteractiveMode {
 		}
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${sessionName ?? name}`), 1, 0));
+		this.ui.requestRender();
+	}
+
+	/**
+	 * `/prefill <text>` primes the next response; `-t`/`--thinking` primes its reasoning instead,
+	 * leaving the other channel as it was. `/prefill` alone reports and clears what is armed.
+	 */
+	private handlePrefillCommand(text: string): void {
+		const argument = text.slice("/prefill".length).replace(/^[ \t]+/, "");
+		const thinkingFlag = /^(-t|--thinking)(\s|$)/.exec(argument);
+		const prefill = (thinkingFlag ? argument.slice(thinkingFlag[0].length) : argument)
+			.replace(/^[ \t]+/, "")
+			.trimEnd();
+
+		if (!prefill) {
+			const armed = this.session.getPrefill();
+			if (armed) {
+				this.session.setPrefill(undefined);
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new Text(theme.fg("dim", "Prefill cleared:"), 1, 0));
+				if (armed.thinking) {
+					this.chatContainer.addChild(new Text(theme.fg("dim", `reasoning: ${armed.thinking}`), 1, 0));
+				}
+				if (armed.text) {
+					this.chatContainer.addChild(new Text(theme.fg("dim", `response: ${armed.text}`), 1, 0));
+				}
+			} else {
+				this.showWarning("Usage: /prefill [-t] <text the assistant continues>   (-t primes the reasoning)");
+			}
+			this.ui.requestRender();
+			return;
+		}
+
+		// Each flavour sets its own channel, so a response prefill and a reasoning prefill can be
+		// armed together by running the command twice.
+		const armed = this.session.getPrefill();
+		this.session.setPrefill(thinkingFlag ? { ...armed, thinking: prefill } : { ...armed, text: prefill });
+
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(
+			new Text(
+				theme.fg("dim", thinkingFlag ? "Next reasoning is primed with:" : "Next response is primed with:"),
+				1,
+				0,
+			),
+		);
+		this.chatContainer.addChild(new Text(theme.fg("dim", prefill), 1, 0));
+
+		const model = this.session.model;
+		if (thinkingFlag) {
+			if (model && !modelAcceptsThinkingPrefill(model)) {
+				this.showWarning(
+					`${model.api} cannot carry a reasoning prefill, so it is dropped before the request. Reasoning priming needs an OpenAI-compatible completions endpoint such as llama.cpp.`,
+				);
+			}
+		} else if (this.session.thinkingLevel && this.session.thinkingLevel !== "off") {
+			this.showWarning(
+				"Thinking is enabled. Anthropic rejects a primed response while extended thinking is on; use /thinking off if the request fails.",
+			);
+		}
 		this.ui.requestRender();
 	}
 

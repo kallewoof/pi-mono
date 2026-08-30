@@ -55,6 +55,20 @@ With images:
 {"type": "prompt", "message": "What's in this image?", "images": [{"type": "image", "data": "base64-encoded-data", "mimeType": "image/png"}]}
 ```
 
+With a prefill, which primes the response with text the model continues:
+```json
+{"type": "prompt", "message": "Plan the refactor", "prefill": "Here is my plan:\n1."}
+```
+
+To prime the model's reasoning instead of its visible answer, send an object:
+```json
+{"type": "prompt", "message": "Plan the refactor", "prefill": {"thinking": "Before anything else I must check how the callers use this."}}
+```
+
+The prefill is sent as a trailing assistant message and merged into the response, so `message_end` carries the primed text plus the continuation. It applies to the first LLM call of the run only.
+
+Support varies by endpoint. A `text` prefill works on Anthropic (but not while extended thinking is enabled), OpenAI-compatible completions, and Google; OpenAI Responses ignores it. A `thinking` prefill is carried as `reasoning_content` and only reaches OpenAI-compatible completions endpoints (llama.cpp, vLLM, DeepSeek); elsewhere it is dropped rather than sent as something the API would reject. Add `thinkingField` to name a different reasoning field (`reasoning`, `reasoning_text`).
+
 **During streaming**: If the agent is already streaming, you must specify `streamingBehavior` to queue the message:
 
 ```json

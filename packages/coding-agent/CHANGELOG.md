@@ -5,6 +5,8 @@
 ### Added
 
 - Added `maxWidgetLines` setting to configure how many lines an extension/hook widget renders before `... (widget truncated)` (default: 100). See [Settings](docs/settings.md).
+- Added response prefill: `/prefill <text>` primes the next response with text the model continues (`/prefill` alone shows and clears what is armed), `--prefill <text>` primes the first response of a run, and the RPC `prompt` command accepts a `prefill` field. Anthropic rejects a prefill while extended thinking is enabled, and OpenAI Responses ignores it.
+- Added reasoning prefill: `/prefill -t <text>` and `--prefill-thinking <text>` prime the model's chain of thought rather than its visible answer, which is the stronger lever on models that always reason. Carried as `reasoning_content` on OpenAI-compatible completions endpoints (llama.cpp, vLLM, DeepSeek); dropped with a warning on APIs that cannot carry replayable reasoning.
 - Added a `patch` tool that retries the most recent tool call with only the given arguments replaced, so models can recover from small mistakes (wrong path, stray flag, typo) without resending large arguments such as file contents. When a tool call fails and carried a large argument, the error result now advertises this retry path.
 
 ### Fixed

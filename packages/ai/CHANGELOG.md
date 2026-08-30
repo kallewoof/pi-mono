@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `modelAcceptsThinkingPrefill()` and `DEFAULT_THINKING_PREFILL_FIELD`, naming which APIs can carry a reasoning prefill (a trailing assistant message whose reasoning the model continues) and the request field that carries it.
+
 ### Fixed
 
+- Fixed `openai-completions` dropping an assistant message that carries only reasoning. Such a message is how a reasoning prefill is expressed on endpoints that accept one (llama.cpp), and it was being filtered out before the request. Messages whose reasoning field is empty are still dropped.
 - Fixed a session getting permanently stuck after an endpoint rejected an image: `stream()` callers can now mark a model with `markImageInputUnsupported()`, and `transformMessages` (plus the per-provider tool-result image paths) consults `modelAcceptsImageInput()` so the image is replaced with the non-vision placeholder for the rest of the process instead of being resent on every request. Added `isImageInputUnsupportedError()` and `hasImageContent()` for detecting the failure.
 
 ## [0.84.4] - 2026-08-28

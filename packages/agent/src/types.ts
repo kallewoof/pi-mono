@@ -146,6 +146,27 @@ export interface AgentLoopTurnUpdate {
 
 export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
 
+/**
+ * Text the model continues instead of starting its response fresh.
+ *
+ * `thinking` primes the reasoning rather than the visible answer, which is the more effective
+ * lever on models that always reason: the primed sentence becomes the opening of the model's own
+ * chain of thought. It only reaches endpoints that accept replayable reasoning
+ * (`modelAcceptsThinkingPrefill` in pi-ai — OpenAI-compatible completions such as llama.cpp);
+ * elsewhere it is dropped rather than sent as something the API would reject.
+ */
+export interface AgentPrefill {
+	/** Text the visible response starts with. */
+	text?: string;
+	/** Text the reasoning starts with. */
+	thinking?: string;
+	/**
+	 * Request field carrying the thinking prefill on OpenAI-compatible endpoints.
+	 * Defaults to `reasoning_content`; some endpoints read `reasoning` or `reasoning_text`.
+	 */
+	thinkingField?: string;
+}
+
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
 
@@ -267,6 +288,22 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Default: "parallel"
 	 */
 	toolExecution?: ToolExecutionMode;
+
+	/**
+	 * Primes the first assistant response of this loop run. A bare string primes the response text.
+	 *
+	 * The prefill is appended to the outgoing LLM messages as a trailing assistant message, so the
+	 * model continues it instead of starting fresh, and is merged back into the assistant message
+	 * the loop produces, so the transcript reads as one continuous response.
+	 *
+	 * Applies to the first provider request only; later turns in the same run (tool loops, steering)
+	 * are not primed.
+	 *
+	 * Not every API accepts a trailing assistant message. Anthropic rejects one when extended
+	 * thinking is enabled, and OpenAI Responses ignores it. Callers are responsible for deciding
+	 * when priming is appropriate.
+	 */
+	prefill?: string | AgentPrefill;
 
 	/**
 	 * Called before a tool is executed, after arguments have been validated.

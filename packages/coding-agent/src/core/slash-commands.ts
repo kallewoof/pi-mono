@@ -29,6 +29,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "name", description: "Set session display name" },
 	{ name: "session", description: "Show session info and stats" },
 	{ name: "prompt", description: "Show the current system prompt" },
+	{
+		name: "prefill",
+		description: "Prime the next response, or its reasoning with -t, with text the model continues",
+		argumentHint: "[-t] <text>",
+	},
 	{ name: "changelog", description: "Show changelog entries" },
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
 	{ name: "fork", description: "Create a new fork from a previous user message" },

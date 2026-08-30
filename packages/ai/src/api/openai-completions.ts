@@ -1356,12 +1356,19 @@ export function convertMessages(
 			// Some providers require "either content or tool_calls, but not none".
 			// Other providers also don't accept empty assistant messages.
 			// This handles aborted assistant responses that got no content.
+			// A message carrying only reasoning is kept: a trailing reasoning-only assistant message
+			// is how a thinking prefill is expressed on endpoints that accept one (llama.cpp).
+			// The emptiness check matters because `requiresReasoningContentOnAssistantMessages`
+			// puts an empty reasoning field on every assistant message.
 			const content = assistantMsg.content;
 			const hasContent =
 				content !== null &&
 				content !== undefined &&
 				(typeof content === "string" ? content.length > 0 : content.length > 0);
-			if (!hasContent && !assistantMsg.tool_calls) {
+			const hasReasoning = OPENAI_COMPLETIONS_REASONING_FIELDS.some(
+				(field) => (assistantMsg[field]?.length ?? 0) > 0,
+			);
+			if (!hasContent && !assistantMsg.tool_calls && !hasReasoning) {
 				continue;
 			}
 			params.push(assistantMsg);

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AgentLoopConfig.prefill` and `Agent.prefill`: text that primes the next assistant response. It is sent as a trailing assistant message the model continues, and merged back into the streamed and final assistant message so the transcript reads as one response. It applies to the first provider request of a run only and is cleared when the run ends. Endpoints that echo the prefill back (llama.cpp) and endpoints that return only the continuation (Anthropic) both end up with the primed text exactly once.
+- Added reasoning prefill via `AgentPrefill`: `{ thinking }` primes the model's chain of thought instead of its visible answer, carried as a thinking block whose signature names the request field (`reasoning_content` by default, `thinkingField` to override). Dropped for APIs that cannot carry replayable reasoning, per `modelAcceptsThinkingPrefill`.
+
 ### Fixed
 
 - Fixed the agent loop bricking a session when the endpoint rejects image input (for example a llama.cpp server started without an mmproj, which answers `500 image input is not supported`). The failed attempt is no longer committed to the transcript; the model is downgraded to text-only and the turn is retried once, so the model sees an image-omitted placeholder in the tool result and the session continues.

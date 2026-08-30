@@ -17,6 +17,7 @@ import type {
 	AgentLoopConfig,
 	AgentLoopTurnUpdate,
 	AgentMessage,
+	AgentPrefill,
 	AgentState,
 	AgentTool,
 	BeforeToolCallContext,
@@ -212,6 +213,13 @@ export class Agent {
 	public maxRetryDelayMs?: number;
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
+	/**
+	 * Primes the next assistant response, sent as a trailing assistant message the model continues.
+	 * A bare string primes the response text; `{ thinking }` primes the reasoning instead.
+	 * Consumed by the next run: it applies to that run's first provider request and is cleared when
+	 * the run finishes, so it never leaks into a later prompt.
+	 */
+	public prefill?: string | AgentPrefill;
 
 	constructor(options: AgentOptions) {
 		// Older compiled consumers may omit options or streamFn even though the current API requires them.
@@ -487,6 +495,7 @@ export class Agent {
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			toolExecution: this.toolExecution,
+			prefill: this.prefill,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			shouldStopAfterTurn: shouldStopAfterTurn
@@ -559,6 +568,7 @@ export class Agent {
 	}
 
 	private finishRun(): void {
+		this.prefill = undefined;
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();

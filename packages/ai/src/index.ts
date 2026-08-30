@@ -41,6 +41,7 @@ export * from "./utils/event-stream.ts";
 export * from "./utils/image-support.ts";
 export * from "./utils/json-parse.ts";
 export * from "./utils/overflow.ts";
+export * from "./utils/prefill-support.ts";
 export * from "./utils/retry.ts";
 export { contentText } from "./utils/text.ts";
 export * from "./utils/typebox-helpers.ts";

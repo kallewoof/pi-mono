@@ -52,6 +52,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optionally with custom instructions |
 | `/copy` | Copy last assistant message to clipboard |
+| `/prefill [-t] <text>` | Prime the next response, or its reasoning with `-t`, with text the model continues; `/prefill` alone shows and clears it |
 | `/export [file]` | Export session to HTML or JSONL |
 | `/import <file>` | Import and resume a session from a JSONL file |
 | `/share` | Upload as private GitHub gist with shareable HTML link |

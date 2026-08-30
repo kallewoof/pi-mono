@@ -20,6 +20,7 @@ import type {
 	AgentContext,
 	AgentEvent,
 	AgentMessage,
+	AgentPrefill,
 	AgentState,
 	AgentTool,
 	PrepareNextTurnContext,
@@ -246,6 +247,21 @@ export interface ExtensionBindings {
 	sendMessageToContext?: SendMessageToContextHandler;
 }
 
+/**
+ * Trim a prefill's channels and drop it entirely when nothing is left to prime with.
+ *
+ * Trailing whitespace is stripped here as well as in the agent loop so `getPrefill()` reports
+ * exactly what will be sent.
+ */
+function normalizePrefill(prefill: string | AgentPrefill | undefined): AgentPrefill | undefined {
+	if (!prefill) return undefined;
+	const requested = typeof prefill === "string" ? { text: prefill } : prefill;
+	const text = requested.text?.trimEnd() || undefined;
+	const thinking = requested.thinking?.trimEnd() || undefined;
+	if (!text && !thinking) return undefined;
+	return { text, thinking, thinkingField: requested.thinkingField };
+}
+
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
 	/** Whether to dispatch extension commands and expand skill commands and prompt templates (default: true) */
@@ -256,6 +272,13 @@ export interface PromptOptions {
 	streamingBehavior?: "steer" | "followUp";
 	/** Source of input for extension input event handlers. Defaults to "interactive". */
 	source?: InputSource;
+	/**
+	 * Primes the assistant response. Sent as a trailing assistant message that the model continues,
+	 * and merged into the response so the transcript reads as one message. A bare string primes the
+	 * response text; `{ thinking }` primes the reasoning instead.
+	 * Takes precedence over a prefill armed with setPrefill(). Ignored for queued/steered messages.
+	 */
+	prefill?: string | AgentPrefill;
 	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
 	preflightResult?: (success: boolean) => void;
 }
@@ -337,6 +360,8 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
 	private _pendingCustomMessages: CustomMessage[] = [];
+	/** Prefill for the next prompt, set via setPrefill(). Consumed by the next prompt() call. */
+	private _pendingPrefill: AgentPrefill | undefined;
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -1371,7 +1396,31 @@ export class AgentSession {
 		}
 
 		preflightResult?.(true);
+		// One-shot: an armed prefill primes this response only. The agent clears its own copy when
+		// the run ends, so a tool loop or an auto-retry continuation is not primed again.
+		this.agent.prefill = normalizePrefill(options?.prefill) ?? this._pendingPrefill;
+		this._pendingPrefill = undefined;
 		await this._runAgentPrompt(messages);
+	}
+
+	/**
+	 * Arm a prefill for the next prompt.
+	 *
+	 * The prefill is sent as a trailing assistant message that the model continues, which is how
+	 * providers express one. A bare string primes the response text; `{ thinking }` primes the
+	 * reasoning instead, which only reaches endpoints that accept replayable reasoning
+	 * (`modelAcceptsThinkingPrefill`). Pass undefined (or empty text) to disarm.
+	 *
+	 * Not every endpoint accepts a prefill: Anthropic rejects a trailing assistant message while
+	 * extended thinking is enabled, and OpenAI Responses ignores it.
+	 */
+	setPrefill(prefill: string | AgentPrefill | undefined): void {
+		this._pendingPrefill = normalizePrefill(prefill);
+	}
+
+	/** Prefill armed for the next prompt, if any. */
+	getPrefill(): AgentPrefill | undefined {
+		return this._pendingPrefill;
 	}
 
 	/**

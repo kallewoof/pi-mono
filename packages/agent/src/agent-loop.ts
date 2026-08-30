@@ -6,10 +6,13 @@
 import {
 	type AssistantMessage,
 	type Context,
+	DEFAULT_THINKING_PREFILL_FIELD,
 	EventStream,
 	hasImageContent,
 	isImageInputUnsupportedError,
+	type Model,
 	markImageInputUnsupported,
+	modelAcceptsThinkingPrefill,
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
@@ -19,6 +22,7 @@ import type {
 	AgentEvent,
 	AgentLoopConfig,
 	AgentMessage,
+	AgentPrefill,
 	AgentTool,
 	AgentToolCall,
 	AgentToolResult,
@@ -27,6 +31,137 @@ import type {
 } from "./types.ts";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
+
+const EMPTY_USAGE = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+/** A prefill reduced to what the loop needs: trimmed channels, resolved request field. */
+interface ResolvedPrefill {
+	text?: string;
+	thinking?: string;
+	thinkingField: string;
+}
+
+/**
+ * Normalize a prefill for one request against one model.
+ *
+ * Trailing whitespace is stripped because providers reject a prefill that ends in it. A thinking
+ * prefill is dropped for models whose API cannot carry replayable reasoning, rather than sent as
+ * something the API would reject. Returns undefined when nothing is left to prime with.
+ */
+function resolvePrefill(prefill: string | AgentPrefill | undefined, model: Model<any>): ResolvedPrefill | undefined {
+	if (!prefill) return undefined;
+	const requested = typeof prefill === "string" ? { text: prefill } : prefill;
+	const text = requested.text?.trimEnd() || undefined;
+	const thinking = modelAcceptsThinkingPrefill(model) ? requested.thinking?.trimEnd() || undefined : undefined;
+	if (!text && !thinking) return undefined;
+	return { text, thinking, thinkingField: requested.thinkingField || DEFAULT_THINKING_PREFILL_FIELD };
+}
+
+/**
+ * Build the trailing assistant message that carries a prefill to the provider.
+ *
+ * It is tagged with the requesting model so cross-model transforms in pi-ai treat it as same-model
+ * content and pass it through untouched. The thinking block's signature names the request field the
+ * reasoning is written to, which is how the OpenAI-completions adapter replays reasoning.
+ */
+function createPrefillMessage(prefill: ResolvedPrefill, model: Model<any>): AssistantMessage {
+	const content: AssistantMessage["content"] = [];
+	if (prefill.thinking) {
+		content.push({ type: "thinking", thinking: prefill.thinking, thinkingSignature: prefill.thinkingField });
+	}
+	if (prefill.text) {
+		content.push({ type: "text", text: prefill.text });
+	}
+	return {
+		role: "assistant",
+		content,
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: EMPTY_USAGE,
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
+/**
+ * Join primed text with what the provider generated, so the primed text appears exactly once.
+ *
+ * Endpoints disagree about the prefill: llama.cpp echoes it back at the head of the response, while
+ * Anthropic and most others return only the continuation. Comparing prefixes covers both, and keeps
+ * a partially streamed response readable: while the generated text is still shorter than the
+ * prefill, an echoing endpoint is reproducing the prefill and a continuing one is not.
+ */
+function joinPrefill(prefill: string, generated: string): string {
+	if (generated.length >= prefill.length) {
+		return generated.startsWith(prefill) ? generated : prefill + generated;
+	}
+	return prefill.startsWith(generated) ? prefill : prefill + generated;
+}
+
+/**
+ * Merge a prefill back into the response it primed.
+ *
+ * Without this the transcript would start mid-sentence on a continuing endpoint, and a later replay
+ * of the conversation would lose the primed text entirely.
+ */
+function applyPrefill(message: AssistantMessage, prefill: ResolvedPrefill): AssistantMessage {
+	let content = message.content;
+	if (prefill.thinking) {
+		content = mergeThinkingPrefill(content, prefill.thinking, prefill.thinkingField);
+	}
+	if (prefill.text) {
+		content = mergeTextPrefill(content, prefill.text);
+	}
+	return content === message.content ? message : { ...message, content };
+}
+
+function mergeThinkingPrefill(
+	content: AssistantMessage["content"],
+	thinking: string,
+	thinkingField: string,
+): AssistantMessage["content"] {
+	const index = content.findIndex((block) => block.type === "thinking");
+	const block = index === -1 ? undefined : content[index];
+	if (block?.type === "thinking") {
+		const merged = joinPrefill(thinking, block.thinking);
+		if (merged === block.thinking) return content;
+		const next = content.slice();
+		next[index] = { ...block, thinking: merged };
+		return next;
+	}
+	// Nothing to continue yet: thinking leads the message, so the primed reasoning goes first.
+	return [{ type: "thinking", thinking, thinkingSignature: thinkingField }, ...content];
+}
+
+function mergeTextPrefill(content: AssistantMessage["content"], text: string): AssistantMessage["content"] {
+	const index = content.findIndex((block) => block.type === "text");
+	const block = index === -1 ? undefined : content[index];
+	if (block?.type === "text") {
+		const merged = joinPrefill(text, block.text);
+		if (merged === block.text) return content;
+		const next = content.slice();
+		next[index] = { ...block, text: merged };
+		return next;
+	}
+
+	// Nothing to continue (a tool-call-only response): keep the prefill as its own block, placed
+	// after any leading thinking blocks so provider block-ordering rules still hold.
+	let insertAt = 0;
+	while (insertAt < content.length && content[insertAt].type === "thinking") {
+		insertAt++;
+	}
+	const next = content.slice();
+	next.splice(insertAt, 0, { type: "text", text });
+	return next;
+}
 
 /**
  * Start an agent loop with a new prompt message.
@@ -169,6 +304,9 @@ async function runLoop(
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
+	// Priming text for the first provider request only. Providers reject a trailing assistant
+	// message that ends in whitespace, so normalize once and reuse the normalized text everywhere.
+	let prefill = resolvePrefill(config.prefill, config.model);
 
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
@@ -212,7 +350,8 @@ async function runLoop(
 			}
 
 			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
+			const message = await streamAssistantResponse(currentContext, config, prefill, signal, emit, streamFunction);
+			prefill = undefined;
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
@@ -292,6 +431,7 @@ interface StreamAttempt {
 async function streamAssistantResponse(
 	context: AgentContext,
 	config: AgentLoopConfig,
+	prefill: ResolvedPrefill | undefined,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
@@ -305,14 +445,15 @@ async function streamAssistantResponse(
 	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
 	const llmMessages = await config.convertToLlm(messages);
 
-	// Build LLM context
+	// Build LLM context. A prefill rides along as a trailing assistant message: every API that
+	// supports priming expresses it that way, and the response continues that message.
 	const llmContext: Context = {
 		systemPrompt: context.systemPrompt,
-		messages: llmMessages,
+		messages: prefill ? [...llmMessages, createPrefillMessage(prefill, config.model)] : llmMessages,
 		tools: context.tools,
 	};
 
-	let attempt = await runStreamAttempt(context, config, llmContext, signal, emit, streamFunction);
+	let attempt = await runStreamAttempt(context, config, llmContext, prefill, signal, emit, streamFunction);
 
 	// A model can advertise image input while the endpoint behind it rejects it
 	// (a llama.cpp server started without an mmproj is the common case). The
@@ -327,7 +468,7 @@ async function streamAssistantResponse(
 		hasImageContent(llmMessages) &&
 		markImageInputUnsupported(config.model)
 	) {
-		attempt = await runStreamAttempt(context, config, llmContext, signal, emit, streamFunction);
+		attempt = await runStreamAttempt(context, config, llmContext, prefill, signal, emit, streamFunction);
 	}
 
 	if (attempt.started) {
@@ -348,6 +489,7 @@ async function runStreamAttempt(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	llmContext: Context,
+	prefill: ResolvedPrefill | undefined,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
@@ -364,11 +506,16 @@ async function runStreamAttempt(
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
+	// Snapshots carry the continuation, or the prefill plus the continuation on an endpoint that
+	// echoes; either way the prefill is merged into each one. Streaming consumers that render
+	// `message` therefore show the whole response; consumers that accumulate
+	// `assistantMessageEvent` deltas see the primed text at `message_end`.
+	const merge = (message: AssistantMessage): AssistantMessage => (prefill ? applyPrefill(message, prefill) : message);
 
 	for await (const event of response) {
 		switch (event.type) {
 			case "start":
-				partialMessage = event.partial;
+				partialMessage = merge(event.partial);
 				context.messages.push(partialMessage);
 				addedPartial = true;
 				await emit({ type: "message_start", message: { ...partialMessage } });
@@ -384,7 +531,7 @@ async function runStreamAttempt(
 			case "toolcall_delta":
 			case "toolcall_end":
 				if (partialMessage) {
-					partialMessage = event.partial;
+					partialMessage = merge(event.partial);
 					context.messages[context.messages.length - 1] = partialMessage;
 					await emit({
 						type: "message_update",
@@ -396,11 +543,24 @@ async function runStreamAttempt(
 
 			case "done":
 			case "error":
-				return { message: await response.result(), started: addedPartial };
+				return { message: finalizeAttempt(await response.result(), prefill, addedPartial), started: addedPartial };
 		}
 	}
 
-	return { message: await response.result(), started: addedPartial };
+	return { message: finalizeAttempt(await response.result(), prefill, addedPartial), started: addedPartial };
+}
+
+/**
+ * Merge the prefill into the finished message, unless the request failed before the provider
+ * emitted anything. An unstarted failure carries no response to continue, so leaving it untouched
+ * keeps the prefill out of the error message the caller reports and may retry.
+ */
+function finalizeAttempt(
+	message: AssistantMessage,
+	prefill: ResolvedPrefill | undefined,
+	started: boolean,
+): AssistantMessage {
+	return prefill && started ? applyPrefill(message, prefill) : message;
 }
 
 /**

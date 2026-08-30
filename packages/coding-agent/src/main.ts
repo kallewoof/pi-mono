@@ -924,6 +924,11 @@ export async function main(args: string[], options?: MainOptions) {
 			.finally(() => clearTimeout(timeout));
 	}
 
+	// Arm --prefill / --prefill-thinking on the session so the first prompt of any mode is primed.
+	if (parsed.prefill || parsed.prefillThinking) {
+		session.setPrefill({ text: parsed.prefill, thinking: parsed.prefillThinking });
+	}
+
 	if (appMode === "rpc") {
 		printTimings();
 		await runRpcMode(runtime);

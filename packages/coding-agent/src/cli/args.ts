@@ -16,6 +16,8 @@ export interface Args {
 	apiKey?: string;
 	systemPrompt?: string;
 	appendSystemPrompt?: string[];
+	prefill?: string;
+	prefillThinking?: string;
 	thinking?: ThinkingLevel;
 	continue?: boolean;
 	resume?: boolean;
@@ -109,6 +111,10 @@ export function parseArgs(args: string[]): Args {
 			result.apiKey = args[++i];
 		} else if (arg === "--system-prompt" && i + 1 < args.length) {
 			result.systemPrompt = args[++i];
+		} else if (arg === "--prefill" && i + 1 < args.length) {
+			result.prefill = args[++i];
+		} else if (arg === "--prefill-thinking" && i + 1 < args.length) {
+			result.prefillThinking = args[++i];
 		} else if (arg === "--append-system-prompt" && i + 1 < args.length) {
 			result.appendSystemPrompt = result.appendSystemPrompt ?? [];
 			result.appendSystemPrompt.push(args[++i]);
@@ -280,6 +286,8 @@ ${chalk.bold("Options:")}
   --api-key <key>                API key (defaults to env vars)
   --system-prompt <text>         System prompt (default: coding assistant prompt)
   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)
+  --prefill <text>               Start the first response with this text; the model continues it
+  --prefill-thinking <text>      Start the first response's reasoning with this text (OpenAI-compatible endpoints)
   --mode <mode>                  Output mode: text (default), json, or rpc
   --print, -p                    Non-interactive mode: process prompt and exit
   --continue, -c                 Continue previous session
