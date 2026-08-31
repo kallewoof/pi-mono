@@ -1473,6 +1473,10 @@ pi.sendUserMessage("And then summarize", { deliverAs: "followUp" });
 
 // Opt in to extension command dispatch and skill/prompt template expansion
 pi.sendUserMessage("/review src/index.ts", { expandPromptTemplates: true });
+
+// Prime the response the message triggers
+pi.sendUserMessage("Plan the refactor", { prefill: "Here is my plan:\n1." });
+pi.sendUserMessage("Plan the refactor", { prefill: { thinking: "Check how the callers use this first." } });
 ```
 
 **Options:**
@@ -1480,6 +1484,7 @@ pi.sendUserMessage("/review src/index.ts", { expandPromptTemplates: true });
   - `"steer"` - Queues the message for delivery after the current assistant turn finishes executing its tool calls
   - `"followUp"` - Waits for agent to finish all tools
 - `expandPromptTemplates` - Dispatch extension commands and expand skill commands and prompt templates. Defaults to `false`.
+- `prefill` - Primes the response, sent as a trailing assistant message the model continues and merged back into the response. A bare string primes the response text; `{ thinking }` primes the reasoning instead, which only reaches endpoints that accept replayable reasoning (OpenAI-compatible completions) and is dropped elsewhere. The prefill stays with the message: one that has to be queued (`deliverAs`) primes the response it triggers once it is delivered. See [`/prefill`](usage.md).
 
 When not streaming, the message is sent immediately and triggers a new turn. When streaming without `deliverAs`, throws an error.
 
@@ -1487,7 +1492,7 @@ See [send-user-message.ts](../examples/extensions/send-user-message.ts) for a co
 
 ### pi.sendUserMessageToContext(contextName, content, options?)
 
-Send a user message into a named **context session** instead of the current session. The targeted context session is created on-demand if it does not yet exist. Behaves exactly like `pi.sendUserMessage` (always triggers a turn, accepts the same `deliverAs` options) but on the routed session.
+Send a user message into a named **context session** instead of the current session. The targeted context session is created on-demand if it does not yet exist. Behaves exactly like `pi.sendUserMessage` (always triggers a turn, accepts the same `deliverAs` and `prefill` options) but on the routed session.
 
 Only available when running in multi-context RPC mode. In other modes the call is a no-op.
 

@@ -27,6 +27,7 @@ import type {
 	AgentToolCall,
 	AgentToolResult,
 	PrepareNextTurnContext,
+	QueuedAgentMessage,
 	StreamFn,
 } from "./types.ts";
 
@@ -62,6 +63,16 @@ function resolvePrefill(prefill: string | AgentPrefill | undefined, model: Model
 	const thinking = modelAcceptsThinkingPrefill(model) ? requested.thinking?.trimEnd() || undefined : undefined;
 	if (!text && !thinking) return undefined;
 	return { text, thinking, thinkingField: requested.thinkingField || DEFAULT_THINKING_PREFILL_FIELD };
+}
+
+/** The message inside a queue entry, which may be a bare message or a message plus its prefill. */
+function queuedMessage(entry: QueuedAgentMessage): AgentMessage {
+	return "role" in entry ? entry : entry.message;
+}
+
+/** The prefill a queue entry carries, if it is in the object form and carries one. */
+function queuedPrefill(entry: QueuedAgentMessage): string | AgentPrefill | undefined {
+	return "role" in entry ? undefined : entry.prefill;
 }
 
 /**
@@ -303,7 +314,7 @@ async function runLoop(
 	let config = initialConfig;
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
 	// Check for steering messages at start (user may have typed while waiting)
-	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
+	let pendingMessages: QueuedAgentMessage[] = (await config.getSteeringMessages?.()) || [];
 	// Priming text for the first provider request only. Providers reject a trailing assistant
 	// message that ends in whitespace, so normalize once and reuse the normalized text everywhere.
 	let prefill = resolvePrefill(config.prefill, config.model);
@@ -340,11 +351,18 @@ async function runLoop(
 
 			// Process pending messages (inject before next assistant response)
 			if (pendingMessages.length > 0) {
-				for (const message of pendingMessages) {
+				for (const entry of pendingMessages) {
+					const message = queuedMessage(entry);
 					await emit({ type: "message_start", message });
 					await emit({ type: "message_end", message });
 					currentContext.messages.push(message);
 					newMessages.push(message);
+					// A queued message brings its own priming for the request it is about to
+					// trigger — the run-level prefill was consumed by the run's first request,
+					// which this message did not start. Last one in the batch wins, being the
+					// message closest to that request.
+					const queued = queuedPrefill(entry);
+					if (queued) prefill = resolvePrefill(queued, config.model);
 				}
 				pendingMessages = [];
 			}

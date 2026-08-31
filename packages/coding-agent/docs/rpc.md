@@ -65,7 +65,7 @@ To prime the model's reasoning instead of its visible answer, send an object:
 {"type": "prompt", "message": "Plan the refactor", "prefill": {"thinking": "Before anything else I must check how the callers use this."}}
 ```
 
-The prefill is sent as a trailing assistant message and merged into the response, so `message_end` carries the primed text plus the continuation. It applies to the first LLM call of the run only.
+The prefill is sent as a trailing assistant message and merged into the response, so `message_end` carries the primed text plus the continuation. It primes the request this message triggers and nothing after it — including when the message has to be queued (`streamingBehavior`), in which case it primes the request that follows its delivery.
 
 Support varies by endpoint. A `text` prefill works on Anthropic (but not while extended thinking is enabled), OpenAI-compatible completions, and Google; OpenAI Responses ignores it. A `thinking` prefill is carried as `reasoning_content` and only reaches OpenAI-compatible completions endpoints (llama.cpp, vLLM, DeepSeek); elsewhere it is dropped rather than sent as something the API would reject. Add `thinkingField` to name a different reasoning field (`reasoning`, `reasoning_text`).
 

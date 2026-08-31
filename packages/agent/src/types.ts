@@ -167,6 +167,25 @@ export interface AgentPrefill {
 	thinkingField?: string;
 }
 
+/**
+ * A queued steering or follow-up message, plus the prefill that primes the response it triggers.
+ *
+ * Queues accept a bare `AgentMessage` too; the object form exists so priming can travel *with* the
+ * message rather than with the run. A prefill armed on the run (`AgentLoopConfig.prefill`) applies
+ * to the run's first request and nothing else, which is wrong for a message that has to wait: by
+ * the time a queued message is injected, that request is long gone. The prefill here is applied to
+ * the request that follows this message's injection instead, so the same message gets the same
+ * priming whether it started a turn immediately or waited for one to finish.
+ */
+export interface PendingAgentMessage {
+	message: AgentMessage;
+	/** Primes the response this message triggers. See `AgentLoopConfig.prefill` for the channels. */
+	prefill?: string | AgentPrefill;
+}
+
+/** A queued message, with or without its own priming. */
+export type QueuedAgentMessage = AgentMessage | PendingAgentMessage;
+
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
 
@@ -262,8 +281,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Use this for "steering" the agent while it's working.
 	 *
 	 * Contract: must not throw or reject. Return [] when no steering messages are available.
+	 *
+	 * An entry returned in `PendingAgentMessage` form primes the request that follows its injection.
 	 */
-	getSteeringMessages?: () => Promise<AgentMessage[]>;
+	getSteeringMessages?: () => Promise<QueuedAgentMessage[]>;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
@@ -275,8 +296,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Use this for follow-up messages that should wait until the agent finishes.
 	 *
 	 * Contract: must not throw or reject. Return [] when no follow-up messages are available.
+	 *
+	 * An entry returned in `PendingAgentMessage` form primes the request that follows its injection.
 	 */
-	getFollowUpMessages?: () => Promise<AgentMessage[]>;
+	getFollowUpMessages?: () => Promise<QueuedAgentMessage[]>;
 
 	/**
 	 * Tool execution mode.
@@ -297,7 +320,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * the loop produces, so the transcript reads as one continuous response.
 	 *
 	 * Applies to the first provider request only; later turns in the same run (tool loops, steering)
-	 * are not primed.
+	 * are not primed — a queued message that should prime its own turn carries the prefill itself
+	 * (see `PendingAgentMessage`).
 	 *
 	 * Not every API accepts a trailing assistant message. Anthropic rejects one when extended
 	 * thinking is enabled, and OpenAI Responses ignores it. Callers are responsible for deciding

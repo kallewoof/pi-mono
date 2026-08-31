@@ -276,7 +276,8 @@ export interface PromptOptions {
 	 * Primes the assistant response. Sent as a trailing assistant message that the model continues,
 	 * and merged into the response so the transcript reads as one message. A bare string primes the
 	 * response text; `{ thinking }` primes the reasoning instead.
-	 * Takes precedence over a prefill armed with setPrefill(). Ignored for queued/steered messages.
+	 * Takes precedence over a prefill armed with setPrefill(). A message that has to be queued
+	 * (steered or followed up) keeps its prefill and is primed when it is delivered.
 	 */
 	prefill?: string | AgentPrefill;
 	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
@@ -1281,10 +1282,16 @@ export class AgentSession {
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
 				}
+				// The prefill travels with the queued message and primes the request that follows
+				// its injection, so a message that had to wait is primed exactly as it would have
+				// been had it started a turn immediately. An armed prefill is consumed here too,
+				// so it cannot leak into a later prompt.
+				const queuedPrefill = normalizePrefill(options.prefill) ?? this._pendingPrefill;
+				this._pendingPrefill = undefined;
 				if (options.streamingBehavior === "followUp") {
-					await this._queueFollowUp(expandedText, currentImages);
+					await this._queueFollowUp(expandedText, currentImages, queuedPrefill);
 				} else {
-					await this._queueSteer(expandedText, currentImages);
+					await this._queueSteer(expandedText, currentImages, queuedPrefill);
 				}
 				preflightResult?.(true);
 				return;
@@ -1489,9 +1496,10 @@ export class AgentSession {
 	 * before the next LLM call.
 	 * Expands skill commands and prompt templates. Errors on extension commands.
 	 * @param images Optional image attachments to include with the message
+	 * @param prefill Primes the response this message triggers, once it is delivered
 	 * @throws Error if text is an extension command
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
+	async steer(text: string, images?: ImageContent[], prefill?: string | AgentPrefill): Promise<void> {
 		// Check for extension commands (cannot be queued)
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
@@ -1501,7 +1509,7 @@ export class AgentSession {
 		let expandedText = this._expandSkillCommand(text);
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
-		await this._queueSteer(expandedText, images);
+		await this._queueSteer(expandedText, images, normalizePrefill(prefill));
 	}
 
 	/**
@@ -1509,9 +1517,10 @@ export class AgentSession {
 	 * Delivered only when agent has no more tool calls or steering messages.
 	 * Expands skill commands and prompt templates. Errors on extension commands.
 	 * @param images Optional image attachments to include with the message
+	 * @param prefill Primes the response this message triggers, once it is delivered
 	 * @throws Error if text is an extension command
 	 */
-	async followUp(text: string, images?: ImageContent[]): Promise<void> {
+	async followUp(text: string, images?: ImageContent[], prefill?: string | AgentPrefill): Promise<void> {
 		// Check for extension commands (cannot be queued)
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
@@ -1521,41 +1530,47 @@ export class AgentSession {
 		let expandedText = this._expandSkillCommand(text);
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
-		await this._queueFollowUp(expandedText, images);
+		await this._queueFollowUp(expandedText, images, normalizePrefill(prefill));
 	}
 
 	/**
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
-	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+	private async _queueSteer(text: string, images?: ImageContent[], prefill?: AgentPrefill): Promise<void> {
 		this._steeringMessages.push(text);
 		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
 		}
-		this.agent.steer({
-			role: "user",
-			content,
-			timestamp: Date.now(),
-		});
+		this.agent.steer(
+			{
+				role: "user",
+				content,
+				timestamp: Date.now(),
+			},
+			prefill,
+		);
 	}
 
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
-	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
+	private async _queueFollowUp(text: string, images?: ImageContent[], prefill?: AgentPrefill): Promise<void> {
 		this._followUpMessages.push(text);
 		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
 		}
-		this.agent.followUp({
-			role: "user",
-			content,
-			timestamp: Date.now(),
-		});
+		this.agent.followUp(
+			{
+				role: "user",
+				content,
+				timestamp: Date.now(),
+			},
+			prefill,
+		);
 	}
 
 	/**
@@ -1653,10 +1668,13 @@ export class AgentSession {
 	 * @param content User message content (string or content array)
 	 * @param options.deliverAs Delivery mode when streaming: "steer" or "followUp"
 	 * @param options.expandPromptTemplates Whether to dispatch extension commands and expand skill commands and prompt templates. Default: false.
+	 * @param options.prefill Primes the response this message triggers, as a trailing assistant message the
+	 *   model continues. A bare string primes the response text; `{ thinking }` primes the reasoning
+	 *   instead. Applies whether the message starts a turn immediately or has to be queued.
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
+		options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean; prefill?: string | AgentPrefill },
 	): Promise<void> {
 		// Normalize content to text string + optional images
 		let text: string;
@@ -1682,6 +1700,7 @@ export class AgentSession {
 			expandPromptTemplates: options?.expandPromptTemplates ?? false,
 			streamingBehavior: options?.deliverAs,
 			images,
+			prefill: options?.prefill,
 			source: "extension",
 		});
 	}

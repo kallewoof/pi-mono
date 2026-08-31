@@ -22,6 +22,7 @@ import type {
 	AgentTool,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
+	PendingAgentMessage,
 	PrepareNextTurnContext,
 	QueueMode,
 	ShouldStopAfterTurnContext,
@@ -124,22 +125,22 @@ export interface AgentOptions {
 }
 
 class PendingMessageQueue {
-	private messages: AgentMessage[] = [];
+	private messages: PendingAgentMessage[] = [];
 	public mode: QueueMode;
 
 	constructor(mode: QueueMode) {
 		this.mode = mode;
 	}
 
-	enqueue(message: AgentMessage): void {
-		this.messages.push(message);
+	enqueue(message: AgentMessage, prefill?: string | AgentPrefill): void {
+		this.messages.push(prefill ? { message, prefill } : { message });
 	}
 
 	hasItems(): boolean {
 		return this.messages.length > 0;
 	}
 
-	drain(): AgentMessage[] {
+	drain(): PendingAgentMessage[] {
 		if (this.mode === "all") {
 			const drained = this.messages.slice();
 			this.messages = [];
@@ -157,6 +158,20 @@ class PendingMessageQueue {
 	clear(): void {
 		this.messages = [];
 	}
+}
+
+/**
+ * The prefill of the last entry in a drained batch that carries one.
+ *
+ * A batch primes one request, so the message closest to that request wins. With the default
+ * one-at-a-time queue mode a batch is a single message and the question does not arise.
+ */
+function lastQueuedPrefill(entries: PendingAgentMessage[]): string | AgentPrefill | undefined {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const prefill = entries[i]?.prefill;
+		if (prefill) return prefill;
+	}
+	return undefined;
 }
 
 type ActiveRun = {
@@ -287,14 +302,20 @@ export class Agent {
 		return this.followUpQueue.mode;
 	}
 
-	/** Queue a message to be injected after the current assistant turn finishes. */
-	steer(message: AgentMessage): void {
-		this.steeringQueue.enqueue(message);
+	/**
+	 * Queue a message to be injected after the current assistant turn finishes.
+	 * An optional prefill primes the response this message triggers, once it is injected.
+	 */
+	steer(message: AgentMessage, prefill?: string | AgentPrefill): void {
+		this.steeringQueue.enqueue(message, prefill);
 	}
 
-	/** Queue a message to run only after the agent would otherwise stop. */
-	followUp(message: AgentMessage): void {
-		this.followUpQueue.enqueue(message);
+	/**
+	 * Queue a message to run only after the agent would otherwise stop.
+	 * An optional prefill primes the response this message triggers, once it is injected.
+	 */
+	followUp(message: AgentMessage, prefill?: string | AgentPrefill): void {
+		this.followUpQueue.enqueue(message, prefill);
 	}
 
 	/** Remove all queued steering messages. */
@@ -411,13 +432,24 @@ export class Agent {
 		if (lastMessage.role === "assistant") {
 			const queuedSteering = this.steeringQueue.drain();
 			if (queuedSteering.length > 0) {
-				await this.runPromptMessages(queuedSteering, { skipInitialSteeringPoll: true });
+				// These messages start the run rather than being injected into one, so their
+				// prefill becomes the run's prefill.
+				await this.runPromptMessages(
+					queuedSteering.map((entry) => entry.message),
+					{
+						skipInitialSteeringPoll: true,
+						prefill: lastQueuedPrefill(queuedSteering),
+					},
+				);
 				return;
 			}
 
 			const queuedFollowUps = this.followUpQueue.drain();
 			if (queuedFollowUps.length > 0) {
-				await this.runPromptMessages(queuedFollowUps);
+				await this.runPromptMessages(
+					queuedFollowUps.map((entry) => entry.message),
+					{ prefill: lastQueuedPrefill(queuedFollowUps) },
+				);
 				return;
 			}
 
@@ -448,7 +480,7 @@ export class Agent {
 
 	private async runPromptMessages(
 		messages: AgentMessage[],
-		options: { skipInitialSteeringPoll?: boolean } = {},
+		options: { skipInitialSteeringPoll?: boolean; prefill?: string | AgentPrefill } = {},
 	): Promise<void> {
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoop(
@@ -482,7 +514,9 @@ export class Agent {
 		};
 	}
 
-	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
+	private createLoopConfig(
+		options: { skipInitialSteeringPoll?: boolean; prefill?: string | AgentPrefill } = {},
+	): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		const shouldStopAfterTurn = this.shouldStopAfterTurn;
 		return {
@@ -495,7 +529,7 @@ export class Agent {
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			toolExecution: this.toolExecution,
-			prefill: this.prefill,
+			prefill: options.prefill ?? this.prefill,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			shouldStopAfterTurn: shouldStopAfterTurn

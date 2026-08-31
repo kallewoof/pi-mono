@@ -10,7 +10,14 @@ import {
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { agentLoop } from "../src/agent-loop.ts";
-import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
+import type {
+	AgentContext,
+	AgentEvent,
+	AgentLoopConfig,
+	AgentMessage,
+	AgentTool,
+	QueuedAgentMessage,
+} from "../src/types.ts";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
@@ -183,6 +190,50 @@ describe("prefill", () => {
 		await agentLoop([createUserMessage("Go")], context, config, undefined, streamFn).result();
 
 		expect(assistantText(trailingMessages(contexts)[0] as AgentMessage)).toBe("Answer:");
+	});
+
+	it("primes the request a queued message triggers, not one already sent", async () => {
+		const contexts: Context[] = [];
+		const streamFn = (_model: Model<any>, context: Context) => {
+			contexts.push(context);
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage([{ type: "text", text: " continued." }]);
+				stream.push({ type: "start", partial: createAssistantMessage([]) });
+				stream.push({ type: "text_delta", contentIndex: 0, delta: " continued.", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		// A follow-up waits for the current run to wind down, so the run's own prefill is spent
+		// long before it is delivered. Its priming rides along with the message instead.
+		let followUps: QueuedAgentMessage[] = [
+			{ message: createUserMessage("and now the other thing"), prefill: "Then:" },
+		];
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			getFollowUpMessages: async () => {
+				const next = followUps;
+				followUps = [];
+				return next;
+			},
+		};
+
+		const messages = await agentLoop(
+			[createUserMessage("Do the thing")],
+			context,
+			config,
+			undefined,
+			streamFn,
+		).result();
+
+		expect(contexts).toHaveLength(2);
+		expect(trailingMessages(contexts)[0]?.role).toBe("user");
+		expect(assistantText(trailingMessages(contexts)[1] as AgentMessage)).toBe("Then:");
+		expect(assistantText(messages[messages.length - 1])).toBe("Then: continued.");
 	});
 
 	it("primes only the first request of a run", async () => {

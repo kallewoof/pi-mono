@@ -81,6 +81,105 @@ describe("AgentSession prefill", () => {
 		expect(requests[0]?.[requests[0].length - 1]?.role).toBe("user");
 	});
 
+	it("primes a message an extension sends through sendUserMessage", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		const requests: Message[][] = [];
+		harness.setResponses([
+			(context: Context) => {
+				requests.push([...context.messages]);
+				return fauxAssistantMessage(" check the callers.");
+			},
+		]);
+
+		await harness.session.sendUserMessage("run the scheduled job", { prefill: "First," });
+
+		expect(trailingText(requests[0])).toBe("First,");
+	});
+
+	it("primes a message that had to be queued as a follow-up", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		const requests: Message[][] = [];
+		harness.setResponses([
+			async (context: Context) => {
+				requests.push([...context.messages]);
+				// Queue while the run is in flight — the run's own first request is long past
+				// by the time this message is delivered.
+				await harness.session.prompt("and then the other thing", {
+					streamingBehavior: "followUp",
+					prefill: "Then:",
+				});
+				return fauxAssistantMessage("first");
+			},
+			(context: Context) => {
+				requests.push([...context.messages]);
+				return fauxAssistantMessage(" the other thing.");
+			},
+		]);
+
+		await harness.session.prompt("do the thing");
+
+		expect(requests).toHaveLength(2);
+		// The run's first request is unprimed; the queued message primes the one it triggers.
+		expect(requests[0]?.[requests[0].length - 1]?.role).toBe("user");
+		expect(trailingText(requests[1])).toBe("Then:");
+		expect(getMessageText(harness.session.messages.at(-1))).toBe("Then: the other thing.");
+	});
+
+	it("primes a message that had to be queued as steering", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		const requests: Message[][] = [];
+		harness.setResponses([
+			async (context: Context) => {
+				requests.push([...context.messages]);
+				await harness.session.prompt("actually, do it this way", {
+					streamingBehavior: "steer",
+					prefill: "Adjusting:",
+				});
+				return fauxAssistantMessage("first");
+			},
+			(context: Context) => {
+				requests.push([...context.messages]);
+				return fauxAssistantMessage(" done.");
+			},
+		]);
+
+		await harness.session.prompt("do the thing");
+
+		expect(requests).toHaveLength(2);
+		expect(trailingText(requests[1])).toBe("Adjusting:");
+	});
+
+	it("primes a queued message from a prefill armed with setPrefill", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		const requests: Message[][] = [];
+		harness.setResponses([
+			async (context: Context) => {
+				requests.push([...context.messages]);
+				harness.session.setPrefill("Armed:");
+				await harness.session.prompt("queued", { streamingBehavior: "followUp" });
+				return fauxAssistantMessage("first");
+			},
+			(context: Context) => {
+				requests.push([...context.messages]);
+				return fauxAssistantMessage(" ok");
+			},
+		]);
+
+		await harness.session.prompt("do the thing");
+
+		expect(trailingText(requests[1])).toBe("Armed:");
+		// Consumed by the queued message, so it cannot leak into a later prompt.
+		expect(harness.session.getPrefill()).toBeUndefined();
+	});
+
 	it("accepts a per-prompt prefill that overrides the armed one", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
